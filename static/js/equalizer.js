@@ -7,6 +7,7 @@ let audioCtx = null;
 let sourceNode = null;
 let bands = []; // 10-band BiquadFilterNodes
 let analyserNode = null;
+let preAmpNode = null; // The secret Auto-Gain volume controller
 
 // Sound Stage Effects Nodes
 let surroundDelayNode = null;
@@ -18,11 +19,10 @@ let stereoWidenerRight = null;
 let splitterNode = null;
 let mergerNode = null;
 
-// Presets maps: 10 bands values in dB (-12 to 12)
-// Frequency centers: 31Hz, 62Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz
+// Presets maps: Safe Bass Boost (Subtractive method to prevent clipping)
 const EQ_PRESETS = {
     normal: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    bassboost: [6, 5.5, 4.5, 2.5, 1, 0, 0, 0, 0, 0],
+    bassboost: [3.5, 2.5, 1.5, 0, -1, -2, -2, -2, -2, -2], 
     vocalboost: [-2, -1.5, -1, 1, 3.5, 4.5, 4, 2, 1, 0],
     pop: [-1.5, -1, 0, 2, 4, 3.5, 2, 0, -1, -1.5],
     rock: [4, 3, 1.5, -1, -2, -1.5, 1, 2.5, 3.5, 4],
@@ -33,7 +33,7 @@ const EQ_PRESETS = {
 function initEqualizer(audioElement) {
     if (audioCtx) return; // Already initialized
 
-    // Create Context (lazy init on user interaction)
+    // Create Context
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AudioContextClass();
     
@@ -44,13 +44,17 @@ function initEqualizer(audioElement) {
     // Create Media Element Source
     sourceNode = audioCtx.createMediaElementSource(audioElement);
 
+    // SPOTIFY FIX: Dynamic Pre-Amp Node
+    preAmpNode = audioCtx.createGain();
+    preAmpNode.gain.value = 1.0; 
+    sourceNode.connect(preAmpNode);
+
     // Build the 10-band Biquad Filters
     const frequencies = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-    let prevNode = sourceNode;
+    let prevNode = preAmpNode;
 
     frequencies.forEach((freq, idx) => {
         const filter = audioCtx.createBiquadFilter();
-        // First band is low-shelf, last is high-shelf, others are peaking
         if (idx === 0) {
             filter.type = 'lowshelf';
         } else if (idx === frequencies.length - 1) {
@@ -73,55 +77,58 @@ function initEqualizer(audioElement) {
     splitterNode = audioCtx.createChannelSplitter(2);
     mergerNode = audioCtx.createChannelMerger(2);
 
-    // Surround Sound Node (Custom Delay loop on right channel to simulate auditory phase offset)
+    // Surround Sound Node
     surroundDelayNode = audioCtx.createDelay(0.1);
-    surroundDelayNode.delayTime.value = 0.025; // 25ms delay
+    surroundDelayNode.delayTime.value = 0.025; 
     surroundFeedbackGain = audioCtx.createGain();
-    surroundFeedbackGain.gain.value = 0.0; // Bypassed initially
+    surroundFeedbackGain.gain.value = 0.0; 
 
     // Spatial Audio (Panner Node)
     spatialPanner = audioCtx.createPanner();
     spatialPanner.panningModel = 'HRTF';
     spatialPanner.distanceModel = 'inverse';
-    // Set position at origin initially
     spatialPanner.positionX.value = 0;
     spatialPanner.positionY.value = 0;
     spatialPanner.positionZ.value = 0;
 
-    // Stereo Widener (Mid/Side processing simulation using phase inversion)
+    // Stereo Widener
     stereoWidenerLeft = audioCtx.createGain();
     stereoWidenerRight = audioCtx.createGain();
     stereoWidenerLeft.gain.value = 1.0;
     stereoWidenerRight.gain.value = 1.0;
 
-    // Reverb node (Simple delay network to simulate space echoes)
+    // Reverb node
     reverbNode = audioCtx.createDelay(0.5);
-    reverbNode.delayTime.value = 0.15; // 150ms echo delay
+    reverbNode.delayTime.value = 0.0; // Fixed reverb bug
     let reverbGain = audioCtx.createGain();
-    reverbGain.gain.value = 0.0; // Bypassed initially
+    reverbGain.gain.value = 0.3; // Safe reverb volume
     
-    // Connect reverb loop
-    reverbNode.connect(reverbGain);
-    reverbGain.connect(reverbNode);
-
-    // Connecting standard flow:
-    // EQ Chain (prevNode is last EQ band) -> Analyser -> Effects Bus -> Output
+    // Connect EQ output to analyser
     prevNode.connect(analyserNode);
 
-    // Effects Bus
-    // Direct path to output
-    analyserNode.connect(audioCtx.destination);
-    
-    // Reverb connection
-    analyserNode.connect(reverbNode);
-    reverbGain.connect(audioCtx.destination);
-    
-    // Spatial connection (if enabled, we route through panner. Bypassed by default)
-    // For simplicity, we just leave panner connected to output with coordinates at origin
+    // Connect standard flow
     analyserNode.connect(spatialPanner);
-    spatialPanner.connect(audioCtx.destination);
-    // Control volume of spatial path vs direct path
-    spatialPanner.coneOuterGain = 0; // Disabled by default
+
+    // SOFT LIMITER: Prevents vocal pumping and distortion
+    const masterLimiter = audioCtx.createDynamicsCompressor();
+    masterLimiter.threshold.value = -1.0; 
+    masterLimiter.knee.value = 0.0;
+    masterLimiter.ratio.value = 20.0; 
+    masterLimiter.attack.value = 0.005; 
+    masterLimiter.release.value = 0.050;
+    
+    // Connect standard path to compressor
+    spatialPanner.connect(masterLimiter);
+    
+    // Connect reverb loop safely
+    spatialPanner.connect(reverbNode);
+    reverbNode.connect(reverbGain);
+    reverbGain.connect(masterLimiter);
+
+    // Finally, send safe audio to speakers
+    masterLimiter.connect(audioCtx.destination);
+    
+    spatialPanner.coneOuterGain = 0;
 }
 
 function setBandGain(index, gainValue) {
@@ -130,6 +137,23 @@ function setBandGain(index, gainValue) {
     if (idx >= 0 && idx < bands.length) {
         bands[idx].gain.value = parseFloat(gainValue);
     }
+
+    // ⭐ AUTO-GAIN COMPENSATION ENGINE ⭐
+    let maxBoost = 0;
+    bands.forEach(band => {
+        if (band.gain.value > maxBoost) maxBoost = band.gain.value;
+    });
+
+    if (preAmpNode) {
+        if (maxBoost > 0) {
+            // Agar slider upar gaya hai, toh main volume apne aap safe ho jayega
+            let safeGain = Math.pow(10, -(maxBoost * 0.85) / 20); 
+            preAmpNode.gain.setTargetAtTime(safeGain, audioCtx.currentTime, 0.1);
+        } else {
+            // Normal volume
+            preAmpNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.1);
+        }
+    }
 }
 
 function setPreset(presetName) {
@@ -137,8 +161,8 @@ function setPreset(presetName) {
     const values = EQ_PRESETS[presetName.toLowerCase()];
     if (values) {
         values.forEach((val, idx) => {
-            bands[idx].gain.value = val;
-            // Update UI sliders dynamically if function exists in app.js
+            setBandGain(idx, val); // Using setBandGain to trigger Auto-Gain
+            // Update UI sliders dynamically
             if (window.updateEQSliderUI) {
                 window.updateEQSliderUI(idx, val);
             }
@@ -149,9 +173,7 @@ function setPreset(presetName) {
 function toggleSurround(enabled) {
     if (!audioCtx) return;
     if (enabled) {
-        // Feed right channel to delay
         surroundFeedbackGain.gain.value = 0.45;
-        // In virtual space, offset positions
         spatialPanner.positionX.value = -0.5;
         spatialPanner.positionZ.value = -0.5;
     } else {
@@ -164,8 +186,6 @@ function toggleSurround(enabled) {
 function toggleSpatial(enabled) {
     if (!audioCtx) return;
     if (enabled) {
-        // Enable HRTF panning motion mapping
-        // Create a slow orbit rotation in coordinate system
         startSpatialOrbit();
     } else {
         stopSpatialOrbit();
@@ -179,7 +199,6 @@ function startSpatialOrbit() {
     orbitTimer = setInterval(() => {
         if (!audioCtx) return;
         angle += 0.05;
-        // Circular orbit path around listener's head
         spatialPanner.positionX.value = Math.sin(angle) * 1.5;
         spatialPanner.positionZ.value = Math.cos(angle) * 1.5;
     }, 100);
@@ -199,7 +218,6 @@ function stopSpatialOrbit() {
 function toggleWidener(enabled) {
     if (!audioCtx) return;
     if (enabled) {
-        // Expand the stereo image
         stereoWidenerLeft.gain.value = 1.35;
         stereoWidenerRight.gain.value = 1.35;
     } else {
@@ -210,7 +228,6 @@ function toggleWidener(enabled) {
 
 function toggleReverb(enabled) {
     if (!audioCtx) return;
-    // Connect reverb signal to output
     if (enabled) {
         reverbNode.delayTime.value = 0.22;
     } else {
