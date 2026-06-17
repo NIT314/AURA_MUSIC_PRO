@@ -42,6 +42,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initSoundStageUI();
     initSpeechAssistant();
     initThemesSystem();
+    initMobileAudioUnlock();
     
     // Initialize Web Audio and Canvas
     window.initVisualizers();
@@ -50,6 +51,45 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load Initial Home Data
     loadHomeData();
 });
+
+// Mobile Audio Unlock - required for iOS/Android autoplay policy
+function initMobileAudioUnlock() {
+    // iOS/Android need a user gesture before AudioContext works
+    // We show a splash tap-to-start if on mobile touch device
+    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    if (!isTouchDevice) return;
+    
+    // Create unlock overlay
+    const overlay = document.createElement('div');
+    overlay.id = 'audio-unlock-overlay';
+    overlay.innerHTML = `
+        <div style="font-size:60px; margin-bottom:10px;">🎵</div>
+        <h2>AURA ∞ MUSIC</h2>
+        <p>Tap anywhere to start your music experience</p>
+        <button class="btn btn-gold" style="margin-top:10px; font-size:16px; padding:14px 36px;">Start Listening</button>
+    `;
+    document.body.appendChild(overlay);
+    
+    const unlock = () => {
+        // Create and immediately suspend a AudioContext to unlock audio
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        ctx.resume().then(() => ctx.close());
+        
+        overlay.style.opacity = '0';
+        overlay.style.transition = 'opacity 0.4s ease';
+        setTimeout(() => overlay.remove(), 400);
+        
+        document.removeEventListener('touchstart', unlock);
+    };
+    
+    document.addEventListener('touchstart', unlock, { once: true });
+    overlay.querySelector('button').addEventListener('click', unlock);
+}
 
 // 1. STATE MANAGEMENT
 
@@ -560,13 +600,17 @@ function initPlayerBindings() {
         }
     });
 
-    // Open/Close Full Player transitions
+    // Open/Close Full Player transitions - use player-open class (CSS transform)
     document.getElementById("open-full-player-trigger").addEventListener("click", () => {
-        document.getElementById("full-player").classList.remove("hide");
+        document.getElementById("full-player").classList.add("player-open");
+    });
+    // Also tap on mini artwork opens full player
+    document.getElementById("mini-artwork").addEventListener("click", () => {
+        document.getElementById("full-player").classList.add("player-open");
     });
     
     document.getElementById("close-full-player-btn").addEventListener("click", () => {
-        document.getElementById("full-player").classList.add("hide");
+        document.getElementById("full-player").classList.remove("player-open");
     });
 
     // Actions bindings on Full Player
@@ -582,6 +626,17 @@ function initPlayerBindings() {
     // Lyrics Overlay panels
     document.getElementById("player-lyrics-toggle-btn").addEventListener("click", openLyricsOverlay);
     document.getElementById("close-lyrics-overlay-btn").addEventListener("click", closeLyricsOverlay);
+    
+    // Queue drawer toggle
+    document.getElementById("player-queue-toggle-btn").addEventListener("click", () => {
+        const drawer = document.getElementById("player-queue-drawer");
+        drawer.classList.toggle("drawer-open");
+    });
+    document.querySelectorAll(".close-drawer-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            btn.closest(".player-drawer").classList.remove("drawer-open");
+        });
+    });
 
     // Dynamic color change based on header timeline (greetings colors)
     setInterval(cycleDynamicHeaderGradient, 8000);
@@ -822,11 +877,11 @@ function updateLyricsTimeline(currentTime) {
 }
 
 function openLyricsOverlay() {
-    document.getElementById("player-lyrics-overlay").classList.remove("hide");
+    document.getElementById("player-lyrics-overlay").classList.add("lyrics-open");
 }
 
 function closeLyricsOverlay() {
-    document.getElementById("player-lyrics-overlay").classList.add("hide");
+    document.getElementById("player-lyrics-overlay").classList.remove("lyrics-open");
 }
 
 // 6. GESTURES INTERACTION MODULE

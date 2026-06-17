@@ -7,32 +7,54 @@ let jamSocket = null;
 let currentRoomCode = "";
 let currentUsername = "";
 let currentUserRole = "listener"; // Default
+let jamReconnectTimer = null;
+let jamReconnectAttempts = 0;
+let jamShouldReconnect = false; // Only reconnect if user hasn't manually left
+const JAM_MAX_RECONNECT = 8;
+const JAM_RECONNECT_BASE_MS = 1500;
 
-function connectJamRoom(username, roomCode) {
-    if (jamSocket) {
+function connectJamRoom(username, roomCode, isReconnect = false) {
+    if (jamSocket && jamSocket.readyState === WebSocket.OPEN) {
         jamSocket.close();
     }
     
     currentUsername = username.trim();
     currentRoomCode = roomCode.toUpperCase().trim();
+    jamShouldReconnect = true;
     
     // Construct WebSockets URL
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const wsUrl = `${protocol}//${host}/api/jam/ws/${currentRoomCode}?username=${encodeURIComponent(currentUsername)}`;
     
-    showToast(`Connecting to Room ${currentRoomCode}...`);
+    if (!isReconnect) {
+        showToast(`Connecting to Room ${currentRoomCode}...`);
+    } else {
+        showToast(`Reconnecting... (attempt ${jamReconnectAttempts})`);
+        setJamSyncStatus('reconnecting');
+    }
     
-    jamSocket = new WebSocket(wsUrl);
+    try {
+        jamSocket = new WebSocket(wsUrl);
+    } catch (e) {
+        console.error('WebSocket creation failed:', e);
+        scheduleJamReconnect();
+        return;
+    }
     
     jamSocket.onopen = () => {
+        jamReconnectAttempts = 0;
+        clearTimeout(jamReconnectTimer);
         showToast(`Connected to Party Room!`);
-        document.getElementById("jam-lobby-view").classList.add("hide");
-        document.getElementById("jam-room-view").classList.remove("hide");
-        document.getElementById("jam-room-code-display").innerText = currentRoomCode;
+        setJamSyncStatus('online');
         
-        // Hide standard local player queue button if inside Jam (queue is managed globally now!)
-        document.getElementById("player-queue-toggle-btn").style.opacity = "0.5";
+        if (!isReconnect) {
+            document.getElementById("jam-lobby-view").classList.add("hide");
+            document.getElementById("jam-room-view").classList.remove("hide");
+            document.getElementById("jam-room-code-display").innerText = currentRoomCode;
+            // Hide standard local player queue button if inside Jam
+            document.getElementById("player-queue-toggle-btn").style.opacity = "0.5";
+        }
     };
     
     jamSocket.onmessage = (event) => {
@@ -46,28 +68,67 @@ function connectJamRoom(username, roomCode) {
     
     jamSocket.onerror = (err) => {
         console.error("Jam WebSocket Error:", err);
-        showToast("Connection issue inside Jam room.");
     };
     
-    jamSocket.onclose = () => {
-        showToast("Jam connection closed.");
-        exitJamUI();
+    jamSocket.onclose = (event) => {
+        console.log(`Jam WS closed: code=${event.code}, clean=${event.wasClean}`);
+        setJamSyncStatus('offline');
+        
+        if (jamShouldReconnect) {
+            scheduleJamReconnect();
+        } else {
+            exitJamUI();
+        }
     };
 }
 
+function scheduleJamReconnect() {
+    if (!jamShouldReconnect) return;
+    if (jamReconnectAttempts >= JAM_MAX_RECONNECT) {
+        showToast("Connection lost. Could not reconnect to Jam room.");
+        jamShouldReconnect = false;
+        exitJamUI();
+        return;
+    }
+    
+    jamReconnectAttempts++;
+    const delay = Math.min(JAM_RECONNECT_BASE_MS * Math.pow(1.5, jamReconnectAttempts - 1), 15000);
+    console.log(`Jam reconnect in ${Math.round(delay)}ms (attempt ${jamReconnectAttempts})`);
+    setJamSyncStatus('reconnecting');
+    
+    jamReconnectTimer = setTimeout(() => {
+        connectJamRoom(currentUsername, currentRoomCode, true);
+    }, delay);
+}
+
+function setJamSyncStatus(status) {
+    const indicator = document.querySelector('.sync-indicator');
+    if (!indicator) return;
+    indicator.className = `sync-indicator ${status}`;
+    const icons = { online: '\u25cf Connected', reconnecting: '\u25cb Reconnecting...', offline: '\u25cf Disconnected' };
+    indicator.innerHTML = `<i class="fa-solid fa-circle"></i> ${icons[status] || 'Unknown'}`;
+}
+
 function exitJamUI() {
+    clearTimeout(jamReconnectTimer);
     jamSocket = null;
     currentRoomCode = "";
     currentUserRole = "listener";
+    jamShouldReconnect = false;
+    jamReconnectAttempts = 0;
     document.getElementById("jam-lobby-view").classList.remove("hide");
     document.getElementById("jam-room-view").classList.add("hide");
     document.getElementById("player-queue-toggle-btn").style.opacity = "1";
 }
 
 function leaveJamRoom() {
+    jamShouldReconnect = false; // Manual leave - don't reconnect
+    clearTimeout(jamReconnectTimer);
     if (jamSocket) {
         jamSocket.close();
+        jamSocket = null;
     }
+    exitJamUI();
 }
 
 // Outgoing websocket transmissions
@@ -339,8 +400,7 @@ function syncLocalPlayback(data) {
     }
 }
 
-// Emojis reaction animation
-
+// Emojis reaction animation - FIXED positioning
 function triggerFloatingReaction(username, emoji) {
     // Create animated emoji floating up on the screen
     const element = document.createElement("div");
@@ -348,24 +408,24 @@ function triggerFloatingReaction(username, emoji) {
     element.innerText = emoji;
     
     // Random side coordinate offsets
-    const startX = Math.random() * 80 + 10; // 10% to 90% horizontal range
+    const startX = Math.random() * 70 + 10; // 10% to 80% horizontal range
     
     element.style.cssText = `
-        position: absolute;
-        bottom: 80px;
+        position: fixed;
+        bottom: 120px;
         left: ${startX}vw;
-        font-size: 32px;
+        font-size: 34px;
         z-index: 10000;
         pointer-events: none;
-        animation: float-emoji-up 2.2s ease-out forwards;
+        animation: float-emoji-up 2.5s ease-out forwards;
     `;
     
     document.body.appendChild(element);
     
     // Remove element after animation completes
     setTimeout(() => {
-        element.remove();
-    }, 2500);
+        if (element.parentNode) element.remove();
+    }, 2600);
 
     // Show temporary toast for reaction
     showMiniBubble(`${username} reacted: ${emoji}`);
