@@ -14,7 +14,11 @@ try:
 except Exception:
     pass
 
-COOKIES_PATH = os.path.join(os.path.dirname(__file__), '..', 'cookies.txt')
+COOKIES_PATH = (
+    '/etc/secrets/cookies.txt'
+    if os.path.exists('/etc/secrets/cookies.txt')
+    else os.path.join(os.path.dirname(__file__), '..', 'cookies.txt')
+)
 ytmusic = YTMusic()
 MAX_CACHE_SIZE = 100
 stream_cache = OrderedDict()
