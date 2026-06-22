@@ -8,6 +8,11 @@ from collections import OrderedDict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+try:
+    import yt_dlp as _yt_dlp_check
+    logger.info(f"yt-dlp version: {_yt_dlp_check.version.__version__}")
+except Exception:
+    pass
 
 COOKIES_PATH = os.path.join(os.path.dirname(__file__), '..', 'cookies.txt')
 ytmusic = YTMusic()
@@ -25,6 +30,7 @@ def search_music(query: str, filter_type: str = None):
             'no_warnings': True,
             'nocheckcertificate': True,
             'extract_flat': True,
+            'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
         }
         
@@ -85,6 +91,7 @@ def get_suggestions(query: str):
             'no_warnings': True,
             'nocheckcertificate': True,
             'extract_flat': True,
+            'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
         }
         
@@ -121,6 +128,7 @@ def get_streaming_url(video_id: str) -> str:
         'nocheckcertificate': True,
         'skip_download': True,
         'extract_flat': False,
+        'force_ipv4': True,
         'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
     }
     try:
