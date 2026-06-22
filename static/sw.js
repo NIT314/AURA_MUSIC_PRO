@@ -1,4 +1,4 @@
-const CACHE_NAME = 'aura-v8'; // Update version
+const CACHE_NAME = 'aura-v9'; // Updated: icons removed from mandatory cache
 const ASSETS = [
   '/',
   '/index.html',
@@ -7,9 +7,8 @@ const ASSETS = [
   '/js/equalizer.js',
   '/js/visualizer.js',
   '/js/jam.js',
-  '/manifest.json',
-  '/icon-192.png',
-  '/icon-512.png'
+  '/manifest.json'
+  // Icons cached lazily on first fetch — not blocking SW install
 ];
 
 self.addEventListener('install', (e) => {
