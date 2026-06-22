@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import httpx
 from ytmusicapi import YTMusic
 import yt_dlp
 import logging
@@ -8,11 +9,7 @@ from collections import OrderedDict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-try:
-    import yt_dlp as _yt_dlp_check
-    logger.info(f"yt-dlp version: {_yt_dlp_check.version.__version__}")
-except Exception:
-    pass
+logger.info(f"yt-dlp version: {yt_dlp.version.__version__}")
 
 COOKIES_PATH = (
     '/etc/secrets/cookies.txt'
@@ -25,56 +22,7 @@ stream_cache = OrderedDict()
 CACHE_EXPIRY_SECONDS = 18000
 cache_lock = threading.Lock()
 
-INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de",
-    "https://invidious.privacyredirect.com",
-    "https://yt.cdaut.de",
-]
 
-def _search_invidious(query: str, filter_type: str = None):
-    import httpx
-    for instance in INVIDIOUS_INSTANCES:
-        try:
-            url = f"{instance}/api/v1/search"
-            params = {"q": query, "type": "video", "n": 20}
-            response = httpx.get(url, params=params, timeout=8.0)
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            standardized = []
-            for item in data:
-                if item.get("type") != "video":
-                    continue
-                duration_sec = item.get("lengthSeconds", 0)
-                m, s = divmod(int(duration_sec), 60)
-                duration_str = f"{m}:{s:02d}"
-                thumbnail = ""
-                thumbnails = item.get("videoThumbnails", [])
-                if thumbnails:
-                    thumbnail = thumbnails[0].get("url", "")
-                    if thumbnail.startswith("/"):
-                        thumbnail = f"{instance}{thumbnail}"
-                standardized.append({
-                    "id": item.get("videoId", ""),
-                    "title": item.get("title", ""),
-                    "artist": item.get("author", "Unknown Artist"),
-                    "artistId": item.get("authorId", ""),
-                    "album": "",
-                    "albumId": "",
-                    "thumbnail": thumbnail,
-                    "duration": duration_str,
-                    "durationSeconds": duration_sec,
-                    "type": "song",
-                    "year": ""
-                })
-            if standardized:
-                logger.info(f"Invidious search success via {instance}")
-                return standardized
-        except Exception as e:
-            logger.warning(f"Invidious instance {instance} failed: {e}")
-            continue
-    return []
 
 def search_music(query: str, filter_type: str = None):
     try:
@@ -86,9 +34,6 @@ def search_music(query: str, filter_type: str = None):
             'extract_flat': True,
             'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
-            'cookiejar': None,
-            'no_cache_dir': True,
-            'cookiesfrombrowser': None,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_query, download=False)
@@ -122,16 +67,13 @@ def search_music(query: str, filter_type: str = None):
                 "type": "song",
                 "year": str(item.get('upload_date', ''))[:4] if item.get('upload_date') else ""
             })
-        if standardized:
-            return standardized
-        logger.warning("yt-dlp search returned empty, trying Invidious fallback")
-        return _search_invidious(query, filter_type)
+        return standardized
     except Exception as e:
         if 'SSL' in str(e) or 'SSLError' in str(e):
-            logger.error(f"SSL/Network error in search, trying Invidious fallback: {e}")
+            logger.error(f"SSL/Network error in search: {e}")
         else:
-            logger.error(f"Search failed, trying Invidious fallback: {e}")
-        return _search_invidious(query, filter_type)
+            logger.error(f"Search failed: {e}")
+        return []
 
 def get_suggestions(query: str):
     try:
@@ -144,9 +86,6 @@ def get_suggestions(query: str):
             'extract_flat': True,
             'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
-            'cookiejar': None,
-            'no_cache_dir': True,
-            'cookiesfrombrowser': None,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -184,9 +123,6 @@ def get_streaming_url(video_id: str) -> str:
         'extract_flat': False,
         'force_ipv4': True,
         'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
-        'cookiejar': None,
-        'no_cache_dir': True,
-        'cookiesfrombrowser': None,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
