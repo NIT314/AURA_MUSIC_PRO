@@ -18,85 +18,87 @@ cache_lock = threading.Lock()
 
 def search_music(query: str, filter_type: str = None):
     try:
-        api_filter = None
-        if filter_type:
-            ft = filter_type.lower()
-            if "song" in ft:
-                api_filter = "songs"
-            elif "album" in ft:
-                api_filter = "albums"
-            elif "artist" in ft:
-                api_filter = "artists"
-            elif "playlist" in ft:
-                api_filter = "playlists"
-            elif "video" in ft:
-                api_filter = "videos"
-            elif "podcast" in ft:
-                api_filter = "podcasts"
-
-        results = ytmusic.search(query, filter=api_filter, limit=100)
+        search_query = f"ytsearch50:{query}"
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'extract_flat': True,
+            'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            entries = info.get('entries', [])
+        
         standardized = []
-        for item in results:
-            category = item.get("resultType", "song")
-            duration_str = ""
-            duration_sec = 0
-            if "duration" in item and item["duration"]:
-                duration_str = item["duration"]
-                parts = duration_str.split(":")
-                try:
-                    if len(parts) == 2:
-                        duration_sec = int(parts[0]) * 60 + int(parts[1])
-                    elif len(parts) == 3:
-                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                except ValueError:
-                    pass
-            elif "duration_seconds" in item:
-                duration_sec = item["duration_seconds"]
-                m, s = divmod(duration_sec, 60)
-                duration_str = f"{m}:{s:02d}"
-
+        for item in entries:
+            if not item:
+                continue
+            
+            duration_sec = item.get('duration', 0) or 0
+            m, s = divmod(int(duration_sec), 60)
+            duration_str = f"{m}:{s:02d}"
+            
             thumbnail = ""
-            if "thumbnails" in item and item["thumbnails"]:
-                thumbnail = item["thumbnails"][-1].get("url", "")
-
-            artist_name = "Unknown Artist"
-            artist_id = ""
-            if "artists" in item and item["artists"]:
-                artist_name = ", ".join([a.get("name", "") for a in item["artists"] if a.get("name")])
-                artist_id = item["artists"][0].get("id", "")
-            elif "author" in item:
-                artist_name = item["author"]
-
-            album_name = ""
-            album_id = ""
-            if "album" in item and item["album"]:
-                album_name = item.get("album", {}).get("name", "")
-                album_id = item.get("album", {}).get("id", "")
-
+            thumbnails = item.get('thumbnails', [])
+            if thumbnails:
+                thumbnail = thumbnails[-1].get('url', '')
+            
+            artist_name = item.get('uploader', '') or item.get('channel', '') or 'Unknown Artist'
+            artist_name = artist_name.replace(' - Topic', '')
+            
+            video_id = item.get('id', '') or item.get('url', '')
+            if not video_id:
+                continue
+                
             standardized.append({
-                "id": item.get("videoId") or item.get("browseId") or item.get("playlistId") or "",
-                "title": item.get("title", ""),
+                "id": video_id,
+                "title": item.get('title', ''),
                 "artist": artist_name,
-                "artistId": artist_id,
-                "album": album_name,
-                "albumId": album_id,
+                "artistId": item.get('channel_id', ''),
+                "album": "",
+                "albumId": "",
                 "thumbnail": thumbnail,
                 "duration": duration_str,
                 "durationSeconds": duration_sec,
-                "type": category,
-                "year": item.get("year", "")
+                "type": "song",
+                "year": str(item.get('upload_date', ''))[:4] if item.get('upload_date') else ""
             })
+        
         return standardized
+        
     except Exception as e:
         if 'SSL' in str(e) or 'SSLError' in str(e):
-            logger.error(f"SSL/Network error — cookies may be expired: {e}")
+            logger.error(f"SSL/Network error in search: {e}")
         else:
             logger.error(f"Search failed: {e}")
         return []
 
 def get_suggestions(query: str):
     try:
-        return ytmusic.get_search_suggestions(query)
+        search_query = f"ytsearch10:{query}"
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'extract_flat': True,
+            'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            entries = info.get('entries', [])
+        
+        suggestions = []
+        for item in entries:
+            if item and item.get('title'):
+                suggestions.append(item['title'])
+        
+        return suggestions[:10]
+        
     except Exception as e:
         logger.error(f"Failed to fetch suggestions: {e}")
         return []
