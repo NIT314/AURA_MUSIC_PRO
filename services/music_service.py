@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import httpx
 from ytmusicapi import YTMusic
 import yt_dlp
 import logging
