@@ -31,22 +31,34 @@ def get_mood_playlist(mood: str):
 
 def get_ai_recommendations(history_ids: list, current_video_id: str = None):
     recommendations = []
+    
+    # Validation: Sirf valid aur non-empty IDs ko filter karo
+    valid_history = [hid for hid in history_ids if hid and isinstance(hid, str) and hid.strip()]
+    
     try:
         if current_video_id:
             related = get_related_tracks(current_video_id)
-            recommendations.extend(related)
-        if len(recommendations) < 15 and history_ids:
-            random_history_id = random.choice(history_ids)
+            if related:
+                recommendations.extend(related)
+        
+        # Sirf valid history hone par hi process karo
+        if len(recommendations) < 15 and valid_history:
+            random_history_id = random.choice(valid_history)
             related_history = get_related_tracks(random_history_id)
-            existing_ids = {r["id"] for r in recommendations}
-            for track in related_history:
-                if track["id"] not in existing_ids and track["id"] not in history_ids:
-                    recommendations.append(track)
+            
+            if related_history:
+                existing_ids = {r["id"] for r in recommendations}
+                for track in related_history:
+                    if track["id"] not in existing_ids and track["id"] not in valid_history:
+                        recommendations.append(track)
+                        
         if not recommendations:
             recommendations = search_music("trending global hits", filter_type="songs")[:15]
+            
         for track in recommendations:
             track["ai_reason"] = random.choice(AI_DJ_PHRASES)
         return recommendations
+
     except Exception as e:
         logger.error(f"AI DJ failed to generate suggestions: {e}")
         return search_music("top billboard songs", filter_type="songs")[:10]

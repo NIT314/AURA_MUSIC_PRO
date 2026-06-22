@@ -1,4 +1,5 @@
 import time
+import threading
 from ytmusicapi import YTMusic
 import yt_dlp
 import logging
@@ -9,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 ytmusic = YTMusic()
 MAX_CACHE_SIZE = 100
-stream_cache = OrderedDict()    
+stream_cache = OrderedDict()
 CACHE_EXPIRY_SECONDS = 18000
+cache_lock = threading.Lock()
 
 def search_music(query: str, filter_type: str = None):
     try:
@@ -30,7 +32,7 @@ def search_music(query: str, filter_type: str = None):
             elif "podcast" in ft:
                 api_filter = "podcasts"
 
-        results = ytmusic.search(query, filter=api_filter)
+        results = ytmusic.search(query, filter=api_filter, limit=100)
         standardized = []
         for item in results:
             category = item.get("resultType", "song")
@@ -96,14 +98,17 @@ def get_suggestions(query: str):
 
 def get_streaming_url(video_id: str) -> str:
     now = time.time()
-    if video_id in stream_cache:
-        stream_cache.move_to_end(video_id) # LRU: Isey naya mark karein
-        cached = stream_cache[video_id]
-        if cached["expires"] > now:
-            return cached["url"]
+    with cache_lock:
+        if video_id in stream_cache:
+            stream_cache.move_to_end(video_id)
+            cached = stream_cache[video_id]
+            if cached["expires"] > now:
+                return cached["url"]
+            else:
+                del stream_cache[video_id]
 
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio/best', # 🔥 M4A format force karega jo Mobile/Safari par smoothly chalta hai
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
@@ -123,15 +128,13 @@ def get_streaming_url(video_id: str) -> str:
             if not stream_url:
                 stream_url = info.get("url")
             if stream_url:
-                stream_cache[video_id] = {
-                    "url": stream_url,
-                    "expires": now + CACHE_EXPIRY_SECONDS
-                }
-                
-                # ZOMBIE CLEANUP: Agar 100 se zyada gaane ho gaye toh purana uda do
-                if len(stream_cache) > MAX_CACHE_SIZE:
-                    stream_cache.popitem(last=False)
-                    
+                with cache_lock:
+                    stream_cache[video_id] = {
+                        "url": stream_url,
+                        "expires": now + CACHE_EXPIRY_SECONDS
+                    }
+                    if len(stream_cache) > MAX_CACHE_SIZE:
+                        stream_cache.popitem(last=False)
                 return stream_url
             else:
                 raise Exception("No direct format URL found in yt-dlp metadata")

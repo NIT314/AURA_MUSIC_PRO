@@ -1,6 +1,7 @@
 import time
 import json
 import logging
+import asyncio
 from typing import Dict, List, Any
 from fastapi import WebSocket
 
@@ -18,7 +19,9 @@ class JamRoom:
         self.last_updated = time.time()
         self.queue: List[Dict[str, Any]] = []
         self.chat_history: List[Dict[str, Any]] = []
-        self.active_reactions: List[Dict[str, Any]] = []
+        self.host_explicitly_left = False
+        self.host_pending_reconnect = False
+        self.grace_period_task = None
 
     def get_role(self, username: str) -> str:
         return self.roles.get(username, "listener")
@@ -42,23 +45,111 @@ class JamRoom:
         self.active_connections[username] = websocket
         if username not in self.roles:
             self.roles[username] = "listener"
-        await self.add_chat_msg("System", f"{username} joined the Jam party!", msg_type="system")
+        
+        # If the host reconnects, cancel the grace period timer
+        if username == self.host_username:
+            if self.host_pending_reconnect:
+                self.host_pending_reconnect = False
+                if self.grace_period_task:
+                    self.grace_period_task.cancel()
+                    self.grace_period_task = None
+                await self.broadcast({
+                    "type": "host_back"
+                })
+                await self.add_chat_msg("System", f"Host ({username}) reconnected!", msg_type="system")
+            else:
+                await self.add_chat_msg("System", f"{username} joined the Jam party!", msg_type="system")
+        else:
+            await self.add_chat_msg("System", f"{username} joined the Jam party!", msg_type="system")
+
         await self.broadcast_state()
 
-    async def disconnect(self, username: str):
+    async def disconnect(self, username: str, websocket: WebSocket = None):
         if username in self.active_connections:
+            if websocket is not None and self.active_connections[username] != websocket:
+                return
             del self.active_connections[username]
-        if username == self.host_username and self.active_connections:
-            self.host_username = next(iter(self.active_connections.keys()))
-            self.roles[self.host_username] = "host"
-            await self.add_chat_msg("System", f"Host left. {self.host_username} is now the host!", msg_type="system")
+            
+        if username == self.host_username:
+            if self.host_explicitly_left:
+                await self.destroy_room("host_left")
+                return
+            else:
+                # Host dropped unexpectedly
+                if len(self.active_connections) == 0:
+                    await self.destroy_room("host_left")
+                    return
+                else:
+                    self.host_pending_reconnect = True
+                    await self.broadcast({
+                        "type": "host_reconnecting"
+                    })
+                    await self.add_chat_msg("System", f"Host ({username}) disconnected. Waiting 30s to reconnect...", msg_type="system")
+                    self.grace_period_task = asyncio.create_task(self.run_host_grace_period(30.0))
+                    return
+
+        # Non-host disconnection
+        if len(self.active_connections) == 0:
+            # If no users remain, clean up the room
+            if self.grace_period_task:
+                self.grace_period_task.cancel()
+                self.grace_period_task = None
+            if self.room_code in rooms:
+                del rooms[self.room_code]
+            return
+
         await self.add_chat_msg("System", f"{username} left the Jam party.", msg_type="system")
         await self.broadcast_state()
 
-        # 🔥 ZOMBIE CLEANUP: Agar sabhi log room chhod gaye hain, toh room hamesha ke liye delete kar do
-        if len(self.active_connections) == 0:
-            if self.room_code in rooms:
-                del rooms[self.room_code]
+    async def run_host_grace_period(self, duration: float):
+        try:
+            await asyncio.sleep(duration)
+            await self.destroy_room("host_left")
+        except asyncio.CancelledError:
+            pass
+
+    async def destroy_room(self, reason: str):
+        if self.grace_period_task:
+            self.grace_period_task.cancel()
+            self.grace_period_task = None
+            
+        close_msg = json.dumps({
+            "type": "room_closed",
+            "reason": reason
+        })
+        
+        connections = list(self.active_connections.items())
+        for user, ws in connections:
+            try:
+                await ws.send_text(close_msg)
+                await ws.close(code=1000, reason="Host left the session")
+            except Exception:
+                pass
+                
+        self.active_connections.clear()
+        if self.room_code in rooms:
+            del rooms[self.room_code]
+
+    async def close_room(self, username: str):
+        if username == self.host_username:
+            self.host_explicitly_left = True
+            await self.destroy_room("host_left")
+
+    async def handle_heartbeat_sync(self, username: str, video_id: str, position: float):
+        if username != self.host_username:
+            return
+        self.playback_time = float(position)
+        self.last_updated = time.time()
+        # Broadcast standard playback_sync to all other clients
+        await self.broadcast({
+            "type": "playback_sync",
+            "video_id": video_id,
+            "state": self.playback_state,
+            "position": self.playback_time,
+            "track": self.current_track,
+            "server_time": time.time() * 1000,
+            "sender": username
+        })
 
     def get_current_position(self) -> float:
         if self.playback_state == "PLAYING" and self.current_track:
@@ -258,9 +349,9 @@ class JamRoom:
             try:
                 await ws.send_text(message_str)
             except Exception:
-                disconnected_users.append(username)
-        for username in disconnected_users:
-            await self.disconnect(username)
+                disconnected_users.append((username, ws))
+        for username, ws in disconnected_users:
+            await self.disconnect(username, ws)
 
 rooms: Dict[str, JamRoom] = {}
 

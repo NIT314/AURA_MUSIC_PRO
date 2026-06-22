@@ -10,8 +10,13 @@ let currentUserRole = "listener"; // Default
 let jamReconnectTimer = null;
 let jamReconnectAttempts = 0;
 let jamShouldReconnect = false; // Only reconnect if user hasn't manually left
-const JAM_MAX_RECONNECT = 100; // Safar ke hisaab se limit badhayi (Lagatar 15 minute tak try karega)
+const JAM_MAX_RECONNECT = 10; // Safar ke hisaab se limit badhayi (Lagatar 15 minute tak try karega)
 const JAM_RECONNECT_BASE_MS = 1500;
+
+let clockOffset = 0;
+let clockSyncInProgress = false;
+let clockSyncInterval = null;
+let hostHeartbeatInterval = null;
 
 // 🔥 SMART NETWORK LISTENER: Jaise hi phone mein internet wapas aayega, turant reconnect fire hoga
 window.addEventListener('online', () => {
@@ -55,6 +60,10 @@ function connectJamRoom(username, roomCode, isReconnect = false) {
         clearTimeout(jamReconnectTimer);
         setJamSyncStatus('online');
         
+        runClockSync();
+        clearInterval(clockSyncInterval);
+        clockSyncInterval = setInterval(runClockSync, 45000);
+        
         if (!isReconnect) {
             showToast(`Connected to Party Room!`); // Sirf life mein ek baar (First time) dikhao
             document.getElementById("jam-lobby-view").classList.add("hide");
@@ -81,6 +90,10 @@ function connectJamRoom(username, roomCode, isReconnect = false) {
     jamSocket.onclose = (event) => {
         console.log(`Jam WS closed: code=${event.code}, clean=${event.wasClean}`);
         setJamSyncStatus('offline');
+        
+        clearInterval(clockSyncInterval);
+        clockSyncInterval = null;
+        stopHostHeartbeat();
         
         if (jamShouldReconnect) {
             scheduleJamReconnect();
@@ -113,12 +126,23 @@ function setJamSyncStatus(status) {
     const indicator = document.querySelector('.sync-indicator');
     if (!indicator) return;
     indicator.className = `sync-indicator ${status}`;
-    const icons = { online: '\u25cf Connected', reconnecting: '\u25cb Reconnecting...', offline: '\u25cf Disconnected' };
+    const icons = { 
+        online: '\u25cf Connected', 
+        reconnecting: '\u25cb Reconnecting...', 
+        host_reconnecting: '\u25cb Host Reconnecting...',
+        offline: '\u25cf Disconnected' 
+    };
     indicator.innerHTML = `<i class="fa-solid fa-circle"></i> ${icons[status] || 'Unknown'}`;
 }
 
 function exitJamUI() {
     clearTimeout(jamReconnectTimer);
+    clearInterval(clockSyncInterval);
+    clockSyncInterval = null;
+    stopHostHeartbeat();
+    if (window.clearHostEQSyncUI) {
+        window.clearHostEQSyncUI();
+    }
     jamSocket = null;
     currentRoomCode = "";
     currentUserRole = "listener";
@@ -132,11 +156,22 @@ function exitJamUI() {
 function leaveJamRoom() {
     jamShouldReconnect = false; // Manual leave - don't reconnect
     clearTimeout(jamReconnectTimer);
-    if (jamSocket) {
-        jamSocket.close();
-        jamSocket = null;
+    if (jamSocket && jamSocket.readyState === WebSocket.OPEN) {
+        if (currentUserRole === 'host') {
+            jamSocket.send(JSON.stringify({ type: "end_jam" }));
+        } else {
+            jamSocket.send(JSON.stringify({ type: "leave" }));
+        }
+        setTimeout(() => {
+            if (jamSocket) {
+                jamSocket.close();
+                jamSocket = null;
+            }
+            exitJamUI();
+        }, 100);
+    } else {
+        exitJamUI();
     }
-    exitJamUI();
 }
 
 // Outgoing websocket transmissions
@@ -146,6 +181,12 @@ function sendJamPlaybackUpdate(video_id, state, position, trackData) {
     
     // Only controllers or hosts should push playback syncs
     if (currentUserRole !== "host" && currentUserRole !== "co-host") return;
+
+    // Gate local tracks
+    if (video_id && video_id.startsWith("local_")) {
+        showToast("⚠️ Local files cannot be shared in Jam sessions.");
+        return;
+    }
     
     jamSocket.send(JSON.stringify({
         type: "playback_update",
@@ -158,6 +199,13 @@ function sendJamPlaybackUpdate(video_id, state, position, trackData) {
 
 function sendJamAddQueue(song) {
     if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+
+    // Gate local tracks
+    if (song && song.id && song.id.startsWith("local_")) {
+        showToast("⚠️ Local files cannot be shared in Jam sessions.");
+        return;
+    }
+
     jamSocket.send(JSON.stringify({
         type: "add_queue",
         song: song
@@ -235,6 +283,23 @@ function handleJamWSMessage(data) {
     else if (type === "reaction") {
         triggerFloatingReaction(data.username, data.emoji);
     }
+    else if (type === "room_closed") {
+        showToast("Host has ended the Jam session.");
+        exitJamUI();
+    }
+    else if (type === "host_reconnecting") {
+        showToast("Host connection lost. Waiting for host to reconnect...");
+        setJamSyncStatus("host_reconnecting");
+    }
+    else if (type === "host_back") {
+        showToast("Host has reconnected!");
+        setJamSyncStatus("online");
+    }
+    else if (type === "eq_sync") {
+        if (currentUserRole !== 'host' && window.applyHostEQState) {
+            window.applyHostEQState(data.settings);
+        }
+    }
 }
 
 // UI State Bindings
@@ -244,6 +309,17 @@ function updateJamRoomUI(state) {
     const me = state.users.find(u => u.username === currentUsername);
     if (me) {
         currentUserRole = me.role;
+    }
+
+    const leaveBtn = document.getElementById("leave-jam-btn");
+    if (currentUserRole === "host") {
+        if (leaveBtn) leaveBtn.innerText = "End Jam for Everyone";
+        if (!hostHeartbeatInterval) {
+            startHostHeartbeat();
+        }
+    } else {
+        if (leaveBtn) leaveBtn.innerText = "Leave Room";
+        stopHostHeartbeat();
     }
     
     // 2. Update stats and count
@@ -305,8 +381,8 @@ function updateJamRoomUI(state) {
             row.innerHTML = `
                 <div class="track-row-art"><img src="${item.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
                 <div class="track-row-info">
-                    <h4>${item.title}</h4>
-                    <p>${item.artist} • <span style="font-size:10px; color:var(--text-muted);">Added by ${item.submitted_by}</span></p>
+                    <h4>${escapeHTML(item.title)}</h4>
+                    <p>${escapeHTML(item.artist)} • <span style="font-size:10px; color:var(--text-muted);">Added by ${escapeHTML(item.submitted_by)}</span></p>
                 </div>
                 <div class="track-row-actions">
                     <span class="track-duration-badge">${item.duration}</span>
@@ -342,23 +418,24 @@ function updateJamRoomUI(state) {
 function syncLocalPlayback(data) {
     const audio = document.getElementById("audio-element");
     if (!audio) return;
-    
+
+    // Host khud sync nahi leta — woh source of truth hai
+    if (window.getJamRole && window.getJamRole() === 'host') return;
+
     const targetVideoId = data.video_id;
     const targetState = data.state;
     const targetPosition = parseFloat(data.position);
-    
+
     // If empty track, stop playback
     if (!targetVideoId) {
-        if (!audio.paused) {
-            audio.pause();
-        }
+        if (!audio.paused) audio.pause();
         if (window.onSongPlayStateChange) window.onSongPlayStateChange(false);
         return;
     }
-    
-    // 1. Calculate Latency/Drift Compensation
+
+    // 1. Calculate Latency/Drift Compensation using clockOffset
     const now = Date.now();
-    const transmissionDelay = Math.max(0, now - data.server_time) / 1000.0;
+    const transmissionDelay = Math.max(0, (now + clockOffset) - data.server_time) / 1000.0;
     
     let compensatedTarget = targetPosition;
     if (targetState === "PLAYING") {
@@ -463,7 +540,7 @@ function appendJamChatMessage(msg) {
     msgCard.className = `chat-msg ${isSelf ? 'self-msg' : ''} ${msg.type === 'system' ? 'system-msg' : ''}`;
     
     if (msg.type === 'system') {
-        msgCard.innerHTML = `<span>${msg.message}</span>`;
+        msgCard.innerHTML = `<span>${escapeHTML(msg.message)}</span>`;
     } else {
         msgCard.innerHTML = `
             <div class="msg-meta">
@@ -521,6 +598,103 @@ jamStyles.innerText = `
 `;
 document.head.appendChild(jamStyles);
 
+async function runClockSync() {
+    if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+    if (clockSyncInProgress) return;
+    clockSyncInProgress = true;
+    
+    const samples = [];
+    const numRounds = 5;
+    
+    for (let i = 0; i < numRounds; i++) {
+        if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) break;
+        
+        const t0 = Date.now();
+        
+        const sample = await new Promise((resolve) => {
+            const tempListener = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === "pong" && data.t0 === t0) {
+                        const t3 = Date.now();
+                        const t1 = parseFloat(data.t1);
+                        const t2 = parseFloat(data.t2);
+                        
+                        const offset = ((t1 - t0) + (t2 - t3)) / 2;
+                        const rtt = (t3 - t0) - (t2 - t1);
+                        
+                        jamSocket.removeEventListener("message", tempListener);
+                        resolve({ offset, rtt });
+                    }
+                } catch(e) {}
+            };
+            
+            jamSocket.addEventListener("message", tempListener);
+            jamSocket.send(JSON.stringify({ type: "ping", t0: t0 }));
+            
+            setTimeout(() => {
+                jamSocket.removeEventListener("message", tempListener);
+                resolve(null);
+            }, 1000);
+        });
+        
+        if (sample) {
+            samples.push(sample);
+        }
+        
+        await new Promise(r => setTimeout(r, 100));
+    }
+    
+    clockSyncInProgress = false;
+    
+    if (samples.length > 0) {
+        samples.sort((a, b) => a.rtt - b.rtt);
+        const bestSamples = samples.slice(0, Math.ceil(samples.length / 2));
+        const avgOffset = bestSamples.reduce((sum, s) => sum + s.offset, 0) / bestSamples.length;
+        clockOffset = avgOffset;
+        console.log(`Clock sync: offset=${Math.round(clockOffset)}ms. RTT median=${Math.round(samples[0].rtt)}ms.`);
+    }
+}
+
+function startHostHeartbeat() {
+    stopHostHeartbeat();
+    hostHeartbeatInterval = setInterval(() => {
+        if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+        if (currentUserRole !== 'host') {
+            stopHostHeartbeat();
+            return;
+        }
+        
+        const audio = document.getElementById("audio-element");
+        if (audio && !audio.paused && window.currentLoadedTrack) {
+            // Gate local tracks from heartbeat sync
+            if (window.currentLoadedTrack.id.startsWith("local_")) return;
+            
+            jamSocket.send(JSON.stringify({
+                type: "heartbeat_sync",
+                position: audio.currentTime,
+                video_id: window.currentLoadedTrack.id
+            }));
+        }
+    }, 12000);
+}
+
+function stopHostHeartbeat() {
+    if (hostHeartbeatInterval) {
+        clearInterval(hostHeartbeatInterval);
+        hostHeartbeatInterval = null;
+    }
+}
+
+function sendJamEQState(settings) {
+    if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+    if (currentUserRole !== "host" && currentUserRole !== "co-host") return;
+    jamSocket.send(JSON.stringify({
+        type: "eq_sync",
+        settings: settings
+    }));
+}
+
 // Export symbols to window
 window.connectJamRoom = connectJamRoom;
 window.leaveJamRoom = leaveJamRoom;
@@ -532,6 +706,7 @@ window.sendJamSkipToNext = sendJamSkipToNext;
 window.sendJamChatMessage = sendJamChatMessage;
 window.sendJamReaction = sendJamReaction;
 window.sendJamSetRole = sendJamSetRole;
+window.sendJamEQState = sendJamEQState;
 window.isInsideJam = () => jamSocket !== null && jamSocket.readyState === WebSocket.OPEN;
 window.getJamRole = () => currentUserRole;
 window.getJamUsername = () => currentUsername;

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'aura-v3';
+const CACHE_NAME = 'aura-v8'; // Update version
 const ASSETS = [
   '/',
   '/index.html',
@@ -13,10 +13,11 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
+  self.skipWaiting();
   e.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(ASSETS);
-    }).then(() => self.skipWaiting())
+    })
   );
 });
 
@@ -25,7 +26,8 @@ self.addEventListener('activate', (e) => {
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          if (key !== CACHE_NAME) {
+          // 🔥 FIX: 'aura-audio-cache' ko delete hone se bachaya (Offline gaane safe rahenge)
+          if (key !== CACHE_NAME && key !== 'aura-audio-cache') {
             return caches.delete(key);
           }
         })
@@ -41,20 +43,25 @@ self.addEventListener('fetch', (e) => {
   }
   
   e.respondWith(
-    // 🔥 NETWORK-FIRST STRATEGY: Pehle internet se naya code fetch karo
     fetch(e.request)
       .then((response) => {
-        // Agar naya code mil gaya, toh use cache mein update kar lo
+        // 🔥 FIX 1: Sirf 'opaque' (YouTube Thumbnails) ko cache hone se roko. 
+        // Fonts aur CSS (cors/basic) ko cache hone do.
+        if (!response || response.status !== 200 || response.type === 'opaque') {
+          return response;
+        }
+        
         const resClone = response.clone();
         caches.open(CACHE_NAME).then((cache) => {
           cache.put(e.request, resClone);
         });
-        return response; // Naya code user ko dikhao
+        return response;
       })
       .catch(() => {
-        // Agar internet band hai (Offline), tabhi purana cache serve karo
         return caches.match(e.request).then((cachedResponse) => {
-          return cachedResponse || (e.request.mode === 'navigate' ? caches.match('/index.html') : null);
+          if (cachedResponse) return cachedResponse; // Cache mil gaya toh de do
+          if (e.request.mode === 'navigate') return caches.match('/index.html');
+          return Response.error(); // 🔥 FIX 2: Null ki jagah proper error do jisse TypeError na aaye
         });
       })
   );

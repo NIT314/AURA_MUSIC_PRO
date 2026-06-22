@@ -1,6 +1,8 @@
 import os
+import time
 import json
 import logging
+import asyncio
 from fastapi import FastAPI, WebSocket, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +35,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,8 +43,8 @@ app.add_middleware(
 
 @app.get("/api/search")
 @limiter.limit("60/minute") # Ek user 1 minute mein max 60 search kar sakta hai
-def api_search(request: Request, q: str = Query(..., min_length=1), filter: str = None):
-    return search_music(q, filter)
+async def api_search(request: Request, q: str = Query(..., min_length=1), filter: str = None):
+    return await asyncio.to_thread(search_music, q, filter)
 
 @app.get("/api/suggestions")
 def api_suggestions(q: str):
@@ -65,15 +67,12 @@ async def api_stream(video_id: str, request: Request):
     if range_header:
         headers["Range"] = range_header
 
+    # 🔥 FIX: Context manager (with) hataya taaki stream poori hone tak connection open rahe
     client = httpx.AsyncClient()
     try:
-        response_stream = await client.send(
-            client.build_request("GET", stream_url, headers=headers),
-            stream=True,
-            follow_redirects=True
-        )
+        request_obj = client.build_request("GET", stream_url, headers=headers)
+        response_stream = await client.send(request_obj, stream=True, follow_redirects=True)
         
-        status_code = response_stream.status_code
         response_headers = {
             "Content-Type": response_stream.headers.get("content-type", "audio/mpeg"),
             "Accept-Ranges": "bytes",
@@ -90,16 +89,16 @@ async def api_stream(video_id: str, request: Request):
                     yield chunk
             finally:
                 await response_stream.aclose()
-                await client.aclose()
+                await client.aclose() # 🔥 Jab gaana poora ho jayega tab hi close hoga
 
         return StreamingResponse(
             stream_generator(),
-            status_code=status_code,
+            status_code=response_stream.status_code,
             headers=response_headers
         )
     except Exception as e:
-        logger.error(f"Error establishing proxy stream: {e}")
         await client.aclose()
+        logger.error(f"Error establishing proxy stream: {e}")
         raise HTTPException(status_code=500, detail="Error proxying audio stream")
 
 @app.get("/api/lyrics")
@@ -142,7 +141,11 @@ async def jam_websocket_handler(websocket: WebSocket, room_code: str, username: 
     try:
         while True:
             data_str = await websocket.receive_text()
-            data = json.loads(data_str)
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON from {username}")
+                continue
             msg_type = data.get("type")
             if msg_type == "playback_update":
                 video_id = data.get("video_id")
@@ -176,10 +179,38 @@ async def jam_websocket_handler(websocket: WebSocket, room_code: str, username: 
                 new_role = data.get("role")
                 if target_user and new_role:
                     await room.set_user_role(username, target_user, new_role)
+            elif msg_type == "end_jam":
+                await room.close_room(username)
+            elif msg_type == "leave":
+                await room.disconnect(username, websocket)
+            elif msg_type == "ping":
+                t0 = data.get("t0")
+                now_ms = time.time() * 1000.0
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "pong",
+                        "t0": t0,
+                        "t1": now_ms,
+                        "t2": now_ms
+                      }))
+                except Exception:
+                    pass
+            elif msg_type == "heartbeat_sync":
+                video_id = data.get("video_id")
+                position = data.get("position", 0.0)
+                await room.handle_heartbeat_sync(username, video_id, position)
+            elif msg_type == "eq_sync":
+                settings = data.get("settings")
+                if room.has_permission(username, "control_playback"):
+                    await room.broadcast({
+                        "type": "eq_sync",
+                        "settings": settings,
+                        "sender": username
+                    })
     except Exception as e:
         logger.warning(f"WebSocket connection issue for user {username} in {code}: {e}")
     finally:
-        await room.disconnect(username)
+        await room.disconnect(username, websocket)
 
 os.makedirs("static/css", exist_ok=True)
 os.makedirs("static/js", exist_ok=True)
@@ -187,4 +218,5 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)

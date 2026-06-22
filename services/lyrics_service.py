@@ -20,15 +20,16 @@ def parse_lrc(lrc_text: str):
             continue
         text = time_regex.sub("", line).strip()
         for m in matches:
-            minutes = int(m[0])
-            seconds = int(m[1])
-            milliseconds = int(m[2]) if m[2] else 0
-            if len(m[2]) == 1:
-                milliseconds *= 100
-            elif len(m[2]) == 2:
-                milliseconds *= 10
-            total_seconds = minutes * 60 + seconds + (milliseconds / 1000.0)
-            parsed.append({
+                minutes = int(m[0])
+                seconds = int(m[1])
+                if m[2]:
+                    # Pad karke 3 digits banao: "5" → "500", "52" → "520", "123" → "123"
+                    ms_str = m[2].ljust(3, '0')[:3]
+                    milliseconds = int(ms_str)
+                else:
+                    milliseconds = 0
+                total_seconds = minutes * 60 + seconds + (milliseconds / 1000.0)
+                parsed.append({
                 "time": total_seconds,
                 "text": text
             })
