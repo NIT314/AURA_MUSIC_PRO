@@ -86,6 +86,9 @@ def search_music(query: str, filter_type: str = None):
             'extract_flat': True,
             'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
+            'cookiejar': None,
+            'no_cache_dir': True,
+            'cookiesfrombrowser': None,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_query, download=False)
@@ -141,6 +144,9 @@ def get_suggestions(query: str):
             'extract_flat': True,
             'force_ipv4': True,
             'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
+            'cookiejar': None,
+            'no_cache_dir': True,
+            'cookiesfrombrowser': None,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -178,6 +184,9 @@ def get_streaming_url(video_id: str) -> str:
         'extract_flat': False,
         'force_ipv4': True,
         'cookiefile': COOKIES_PATH if os.path.exists(COOKIES_PATH) else None,
+        'cookiejar': None,
+        'no_cache_dir': True,
+        'cookiesfrombrowser': None,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
