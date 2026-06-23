@@ -44,89 +44,107 @@ cache_lock = threading.Lock()
 
 def search_music(query: str, filter_type: str = None):
     try:
-        search_query = f"ytsearch50:{query}"
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'extract_flat': True,
-            'force_ipv4': True,
-            'cookiefile': COOKIES_PATH if COOKIES_PATH and os.path.exists(COOKIES_PATH) else None,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios']
-                }
-            }
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-            entries = info.get('entries', [])
+        # Map filter_type to ytmusicapi search filters
+        yt_filter = None
+        if filter_type:
+            ft_lower = filter_type.lower().strip()
+            if ft_lower in ['songs', 'song']:
+                yt_filter = 'songs'
+            elif ft_lower in ['videos', 'video']:
+                yt_filter = 'videos'
+            elif ft_lower in ['albums', 'album']:
+                yt_filter = 'albums'
+            elif ft_lower in ['artists', 'artist']:
+                yt_filter = 'artists'
+            elif ft_lower in ['playlists', 'playlist']:
+                yt_filter = 'playlists'
+
+        results = ytmusic.search(query, filter=yt_filter, limit=50)
         standardized = []
-        for item in entries:
+        for item in results:
             if not item:
                 continue
-            duration_sec = item.get('duration', 0) or 0
-            m, s = divmod(int(duration_sec), 60)
-            duration_str = f"{m}:{s:02d}"
+            
+            res_type = item.get('resultType', '')
+            
+            # Map videoId or browseId or playlistId
+            video_id = item.get('videoId') or item.get('browseId') or item.get('playlistId')
+            if not video_id:
+                continue
+            
+            # Thumbnail extraction
             thumbnail = ""
             thumbnails = item.get('thumbnails', [])
             if thumbnails:
                 thumbnail = thumbnails[-1].get('url', '')
-            artist_name = item.get('uploader', '') or item.get('channel', '') or 'Unknown Artist'
-            artist_name = artist_name.replace(' - Topic', '')
-            video_id = item.get('id', '') or item.get('url', '')
-            if not video_id:
-                continue
+
+            # Artist extraction
+            artists = item.get('artists', [])
+            if artists:
+                artist_name = ", ".join([a.get("name", "") for a in artists if a.get("name")])
+                artist_id = artists[0].get("id", "")
+            else:
+                artist_name = item.get('artist', '') or item.get('author', '') or 'Unknown Artist'
+                artist_id = ''
+
+            # Duration extraction
+            duration_str = item.get('duration', '')
+            duration_sec = item.get('duration_seconds', 0)
+            if not duration_str and duration_sec:
+                m, s = divmod(int(duration_sec), 60)
+                duration_str = f"{m}:{s:02d}"
+            elif duration_str and not duration_sec:
+                try:
+                    parts = duration_str.split(':')
+                    if len(parts) == 2:
+                        duration_sec = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                except Exception:
+                    duration_sec = 0
+
+            # Album name & ID extraction
+            album_name = ""
+            album_id = ""
+            album_data = item.get('album')
+            if album_data:
+                if isinstance(album_data, dict):
+                    album_name = album_data.get('name', '')
+                    album_id = album_data.get('id', '')
+                elif isinstance(album_data, str):
+                    album_name = album_data
+
+            # Normalize result type (frontend expects song/video/artist/album/playlist)
+            mapped_type = res_type
+            if mapped_type == 'episode':
+                mapped_type = 'video'
+
+            # Set title field appropriately
+            title = item.get('title') or item.get('name') or artist_name
+            if res_type == 'artist':
+                title = item.get('artist') or item.get('name') or 'Unknown Artist'
+
             standardized.append({
                 "id": video_id,
-                "title": item.get('title', ''),
+                "title": title,
                 "artist": artist_name,
-                "artistId": item.get('channel_id', ''),
-                "album": "",
-                "albumId": "",
+                "artistId": artist_id,
+                "album": album_name,
+                "albumId": album_id,
                 "thumbnail": thumbnail,
                 "duration": duration_str,
                 "durationSeconds": duration_sec,
-                "type": "song",
-                "year": str(item.get('upload_date', ''))[:4] if item.get('upload_date') else ""
+                "type": mapped_type,
+                "year": str(item.get('year') or "")
             })
         return standardized
     except Exception as e:
-        if 'SSL' in str(e) or 'SSLError' in str(e):
-            logger.error(f"SSL/Network error in search: {e}")
-        else:
-            logger.error(f"Search failed: {e}")
+        logger.error(f"Search failed: {e}")
         return []
 
 def get_suggestions(query: str):
     try:
-        search_query = f"ytsearch10:{query}"
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'extract_flat': True,
-            'force_ipv4': True,
-            'cookiefile': COOKIES_PATH if COOKIES_PATH and os.path.exists(COOKIES_PATH) else None,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios']
-                }
-            }
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-            entries = info.get('entries', [])
-        
-        suggestions = []
-        for item in entries:
-            if item and item.get('title'):
-                suggestions.append(item['title'])
-        
-        return suggestions[:10]
-        
+        return ytmusic.get_search_suggestions(query)
     except Exception as e:
         logger.error(f"Failed to fetch suggestions: {e}")
         return []
