@@ -1,5 +1,0 @@
-services:
-  - type: web
-    name: aura-music
-    env: docker
-    plan: free
