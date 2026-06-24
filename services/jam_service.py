@@ -40,7 +40,7 @@ class JamRoom:
         if role == "listener":
             if self.add_only_mode:
                 return action == "add_queue"
-            return action in ["vote_queue"]
+            return action in ["add_queue", "vote_queue"]
         return False
 
     async def toggle_add_only_mode(self, username: str, enabled: bool):
@@ -49,10 +49,22 @@ class JamRoom:
             await self.broadcast_state()
 
     async def connect(self, username: str, websocket: WebSocket):
+        if username in self.active_connections:
+            await websocket.close(code=4001, reason="Username already taken")
+            return False
         await websocket.accept()
         self.active_connections[username] = websocket
         if username not in self.roles:
             self.roles[username] = "listener"
+        
+        # Send initial chat history directly to the newly connected user only!
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "chat_history",
+                "history": self.chat_history
+            }))
+        except Exception:
+            pass
         
         # If the host reconnects, cancel the grace period timer
         if username == self.host_username:
@@ -71,6 +83,7 @@ class JamRoom:
             await self.add_chat_msg("System", f"{username} joined the Jam party!", msg_type="system")
 
         await self.broadcast_state()
+        return True
 
     async def disconnect(self, username: str, websocket: WebSocket = None):
         if username in self.active_connections:
@@ -147,6 +160,7 @@ class JamRoom:
         if username != self.host_username:
             return
         self.playback_time = float(position)
+        self.playback_state = "PLAYING"
         self.last_updated = time.time()
         # Broadcast standard playback_sync to all other clients
         await self.broadcast({
@@ -298,6 +312,8 @@ class JamRoom:
     async def set_user_role(self, host_username: str, target_user: str, new_role: str):
         if host_username != self.host_username:
             return
+        if target_user not in self.active_connections:
+            return
         if new_role in ["host", "co-host", "moderator", "contributor", "listener"]:
             if new_role == "host":
                 self.roles[self.host_username] = "co-host"
@@ -342,8 +358,7 @@ class JamRoom:
                 "last_updated": self.last_updated,
                 "current_track": self.current_track
             },
-            "queue": serialized_queue,
-            "chat_history": self.chat_history
+            "queue": serialized_queue
         }
 
     async def broadcast_state(self):

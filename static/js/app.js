@@ -795,16 +795,25 @@ function showJamSelectionMenu(track) {
         return;
     }
 
+    // Prevent duplicates/stacking
+    const existing = document.getElementById("jam-selection-popup-wrapper");
+    if (existing) existing.remove();
+
+    // Create wrapper for backdrop and click outside detection
+    const wrapper = document.createElement("div");
+    wrapper.id = "jam-selection-popup-wrapper";
+    wrapper.style.cssText = "position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:99999; display:flex; align-items:center; justify-content:center;";
+
     // Open a toast options drawer
     const popup = document.createElement("div");
     popup.className = "modal-card glass-panel";
-    popup.style.cssText = "position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:100000;";
+    popup.style.cssText = "position:relative; z-index:100000; width:90%; max-width:400px; padding:20px; border-radius:12px;";
     
     const isListener = window.getJamRole && window.getJamRole() === 'listener';
     
     popup.innerHTML = `
         <h3>Jam Selection</h3>
-        <p style="font-size:12px; margin-bottom:15px; color:var(--text-secondary);">Choose action for '${track.title}'</p>
+        <p style="font-size:12px; margin-bottom:15px; color:var(--text-secondary);">Choose action for '${safe(track.title)}'</p>
         <div style="display:flex; flex-direction:column; gap:10px;">
             ${isListener ? '' : '<button class="btn btn-purple" id="jam-opt-play-now">Sync Play Now</button>'}
             <button class="btn btn-gold" id="jam-opt-add-queue">Add to Voted Queue</button>
@@ -812,14 +821,30 @@ function showJamSelectionMenu(track) {
         </div>
     `;
     
-    document.body.appendChild(popup);
+    wrapper.appendChild(popup);
+    document.body.appendChild(wrapper);
+    
+    // Close on outside click
+    wrapper.onclick = (e) => {
+        if (e.target === wrapper) {
+            wrapper.remove();
+        }
+    };
     
     if (!isListener) {
         document.getElementById("jam-opt-play-now").onclick = () => {
-            popup.remove();
+            wrapper.remove();
+            
+            // Remove from queue first if it is in the queue
+            if (window.isInsideJam && window.isInsideJam()) {
+                if (window.sendJamRemoveQueue) {
+                    window.sendJamRemoveQueue(track.id);
+                }
+            }
+            
             playSingleSong(track);
             // Jam mein sabko broadcast karo
-            if (window.isInsideJam()) {
+            if (window.isInsideJam && window.isInsideJam()) {
                 setTimeout(() => {
                     window.sendJamPlaybackUpdate(
                         track.id,
@@ -833,15 +858,16 @@ function showJamSelectionMenu(track) {
     }
     
     document.getElementById("jam-opt-add-queue").onclick = () => {
-        popup.remove();
+        wrapper.remove();
         window.sendJamAddQueue(track);
         showToast("Added to Jam Queue");
     };
     
     document.getElementById("jam-opt-cancel").onclick = () => {
-        popup.remove();
+        wrapper.remove();
     };
 }
+window.showJamSelectionMenu = showJamSelectionMenu;
 
 function renderSearchHistory() {
     const container = document.getElementById("search-history-container");
@@ -3186,9 +3212,29 @@ document.getElementById("start-aura-flow-btn").addEventListener("click", async (
         }
         
         if (recommendations && recommendations.length > 0) {
-            playerQueue = recommendations;
-            currentQueueIndex = 0;
-            playSingleSong(recommendations[0]);
+            if (window.isInsideJam && window.isInsideJam()) {
+                const role = window.getJamRole ? window.getJamRole() : 'listener';
+                if (role !== 'host' && role !== 'co-host') {
+                    showToast("Only Host or Co-Host can trigger AURA Flow in Jam ⚠️");
+                    return;
+                }
+                const firstTrack = recommendations[0];
+                playSingleSong(firstTrack);
+                setTimeout(() => {
+                    window.sendJamPlaybackUpdate(firstTrack.id, "PLAYING", 0, firstTrack);
+                }, 800);
+                
+                if (recommendations.length > 1) {
+                    recommendations.slice(1).forEach(track => {
+                        window.sendJamAddQueue(track);
+                    });
+                    showToast(`AURA Flow started. Queued ${recommendations.length - 1} recommendations! 🎶`);
+                }
+            } else {
+                playerQueue = recommendations;
+                currentQueueIndex = 0;
+                playSingleSong(recommendations[0]);
+            }
             
             // Show DJ dialog
             showToast(`AI DJ Vibe: "${recommendations[0].ai_reason}"`);
@@ -3216,9 +3262,29 @@ moodCards.forEach(card => {
             }
             
             if (Array.isArray(tracks) && tracks.length > 0) {
-                playerQueue = tracks;
-                currentQueueIndex = 0;
-                playSingleSong(tracks[0]);
+                if (window.isInsideJam && window.isInsideJam()) {
+                    const role = window.getJamRole ? window.getJamRole() : 'listener';
+                    if (role !== 'host' && role !== 'co-host') {
+                        showToast("Only Host or Co-Host can start Mood Stations in Jam ⚠️");
+                        return;
+                    }
+                    const firstTrack = tracks[0];
+                    playSingleSong(firstTrack);
+                    setTimeout(() => {
+                        window.sendJamPlaybackUpdate(firstTrack.id, "PLAYING", 0, firstTrack);
+                    }, 800);
+                    
+                    if (tracks.length > 1) {
+                        tracks.slice(1).forEach(track => {
+                            window.sendJamAddQueue(track);
+                        });
+                        showToast(`Started Mood Station. Queued ${tracks.length - 1} tracks! 🎶`);
+                    }
+                } else {
+                    playerQueue = tracks;
+                    currentQueueIndex = 0;
+                    playSingleSong(tracks[0]);
+                }
             } else {
                 showToast(`No tracks found for mood '${mood}' after exclusions.`);
             }
@@ -3414,9 +3480,49 @@ window.bulkAddPlaylistToJam = (playlistId) => {
 window.playPlaylist = (playlistId) => {
     const pl = playlists.find(p => p.id === playlistId);
     if (!pl || pl.tracks.length === 0) return;
-    playerQueue = [...pl.tracks];
-    currentQueueIndex = 0;
-    playSingleSong(pl.tracks[0]);
+    
+    if (window.isInsideJam && window.isInsideJam()) {
+        const role = window.getJamRole ? window.getJamRole() : 'listener';
+        if (role !== 'host' && role !== 'co-host') {
+            showToast("Only Host or Co-Host can change songs in Jam ⚠️");
+            return;
+        }
+        
+        // Play the first track and broadcast it
+        const firstTrack = pl.tracks[0];
+        if (firstTrack.id && String(firstTrack.id).startsWith("local_")) {
+            showToast("Local files cannot be shared in a Jam session ⚠️");
+            return;
+        }
+        
+        playSingleSong(firstTrack);
+        setTimeout(() => {
+            window.sendJamPlaybackUpdate(firstTrack.id, "PLAYING", 0, firstTrack);
+        }, 800);
+        
+        // Add the rest of the tracks to the queue
+        if (pl.tracks.length > 1) {
+            let addedCount = 0;
+            let localCount = 0;
+            pl.tracks.slice(1).forEach(track => {
+                if (track && track.id && String(track.id).startsWith("local_")) {
+                    localCount++;
+                } else {
+                    window.sendJamAddQueue(track);
+                    addedCount++;
+                }
+            });
+            if (localCount > 0) {
+                showToast(`Playing first track. Queued ${addedCount} tracks, skipped ${localCount} local files ⚠️`);
+            } else {
+                showToast(`Playing first track. Queued remaining ${addedCount} tracks! 🎶`);
+            }
+        }
+    } else {
+        playerQueue = [...pl.tracks];
+        currentQueueIndex = 0;
+        playSingleSong(pl.tracks[0]);
+    }
 };
 
 window.deletePlaylist = (playlistId) => {

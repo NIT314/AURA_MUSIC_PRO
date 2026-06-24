@@ -31,8 +31,15 @@ function connectJamRoom(username, roomCode, isReconnect = false) {
         jamSocket.close();
     }
     
-    currentUsername = username.trim();
-    currentRoomCode = roomCode.toUpperCase().trim();
+    const trimmedUser = username ? username.trim() : "";
+    const trimmedRoom = roomCode ? roomCode.toUpperCase().trim() : "";
+    if (!trimmedUser || !trimmedRoom) {
+        showToast("Username and Room Code cannot be empty.");
+        return;
+    }
+    
+    currentUsername = trimmedUser;
+    currentRoomCode = trimmedRoom;
     jamShouldReconnect = true;
     
     // Construct WebSockets URL
@@ -94,6 +101,13 @@ function connectJamRoom(username, roomCode, isReconnect = false) {
         clearInterval(clockSyncInterval);
         clockSyncInterval = null;
         stopHostHeartbeat();
+        
+        if (event.code === 4001) {
+            showToast("Username already taken. Choose a different name.");
+            jamShouldReconnect = false;
+            exitJamUI();
+            return;
+        }
         
         if (jamShouldReconnect) {
             scheduleJamReconnect();
@@ -280,6 +294,15 @@ function handleJamWSMessage(data) {
     else if (type === "chat_message") {
         appendJamChatMessage(data.message);
     } 
+    else if (type === "chat_history") {
+        const chatContainer = document.getElementById("jam-chat-messages");
+        if (chatContainer) {
+            chatContainer.innerHTML = "";
+            data.history.forEach(msg => {
+                appendJamChatMessage(msg);
+            });
+        }
+    }
     else if (type === "reaction") {
         triggerFloatingReaction(data.username, data.emoji);
     }
@@ -356,6 +379,7 @@ function updateJamRoomUI(state) {
                     <option value="contributor" ${user.role === 'contributor' ? 'selected' : ''}>Contributor</option>
                     <option value="moderator" ${user.role === 'moderator' ? 'selected' : ''}>Mod</option>
                     <option value="co-host" ${user.role === 'co-host' ? 'selected' : ''}>Co-Host</option>
+                    <option value="host">Host (Transfer)</option>
                 </select>
             `;
         } else {
@@ -403,6 +427,13 @@ function updateJamRoomUI(state) {
                 removeBtnHTML = `<button onclick="sendJamRemoveQueue('${item.id}')" title="Remove"><i class="fa-solid fa-trash-can"></i></button>`;
             }
 
+            row.onclick = (event) => {
+                if (event.target.closest("button")) return;
+                if (window.showJamSelectionMenu) {
+                    window.showJamSelectionMenu(item);
+                }
+            };
+
             row.innerHTML = `
                 <div class="track-row-art"><img src="${item.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
                 <div class="track-row-info">
@@ -444,10 +475,23 @@ function syncLocalPlayback(data) {
     const audio = document.getElementById("audio-element");
     if (!audio) return;
 
-    // Host khud sync nahi leta — woh source of truth hai
-    if (window.getJamRole && window.getJamRole() === 'host') return;
-
     const targetVideoId = data.video_id;
+    const currentSong = window.currentLoadedTrack;
+
+    // Host handles track change transitions, but skips playback state / drift adjustments.
+    const isHost = (window.getJamRole && window.getJamRole() === 'host');
+    if (isHost) {
+        if (targetVideoId && (!currentSong || currentSong.id !== targetVideoId)) {
+            showToast(`Syncing song: ${data.track.title}`);
+            if (window.playSongById) {
+                window.playSongById(targetVideoId, data.track, 0, data.state === "PLAYING");
+            }
+        } else if (!targetVideoId) {
+            if (!audio.paused) audio.pause();
+            if (window.onSongPlayStateChange) window.onSongPlayStateChange(false);
+        }
+        return;
+    }
     const targetState = data.state;
     const targetPosition = parseFloat(data.position);
 
@@ -520,6 +564,7 @@ function triggerFloatingReaction(username, emoji) {
     // Random side coordinate offsets
     const startX = Math.random() * 70 + 10; // 10% to 80% horizontal range
     
+    const randomAngle = Math.random() * 60 - 30;
     element.style.cssText = `
         position: fixed;
         bottom: 120px;
@@ -528,6 +573,7 @@ function triggerFloatingReaction(username, emoji) {
         z-index: 10000;
         pointer-events: none;
         animation: float-emoji-up 2.5s ease-out forwards;
+        --rotate-angle: ${randomAngle}deg;
     `;
     
     document.body.appendChild(element);
@@ -545,7 +591,7 @@ function showMiniBubble(text) {
     // Visual trace of party reactions
     const chatMsg = document.createElement("div");
     chatMsg.className = "chat-msg system-msg";
-    chatMsg.innerHTML = `<span style="font-size:10px;">${text}</span>`;
+    chatMsg.innerHTML = `<span style="font-size:10px;">${escapeHTML(text)}</span>`;
     
     const chatContainer = document.getElementById("jam-chat-messages");
     if (chatContainer) {
@@ -569,8 +615,8 @@ function appendJamChatMessage(msg) {
     } else {
         msgCard.innerHTML = `
             <div class="msg-meta">
-                <span>${msg.username}</span>
-                <span>${msg.time}</span>
+                <span>${escapeHTML(msg.username)}</span>
+                <span>${escapeHTML(msg.time)}</span>
             </div>
             <div class="msg-content">${escapeHTML(msg.message)}</div>
         `;
@@ -598,7 +644,7 @@ jamStyles.innerText = `
         0% { transform: translateY(0) scale(0.6) rotate(0deg); opacity: 0; }
         10% { opacity: 1; transform: translateY(-30px) scale(1.2); }
         90% { opacity: 0.8; }
-        100% { transform: translateY(-400px) scale(0.8) rotate(${Math.random() * 60 - 30}deg); opacity: 0; }
+        100% { transform: translateY(-400px) scale(0.8) rotate(var(--rotate-angle, 0deg)); opacity: 0; }
     }
     .role-selector {
         background: rgba(255,255,255,0.06);
@@ -648,7 +694,11 @@ async function runClockSync() {
                         const offset = ((t1 - t0) + (t2 - t3)) / 2;
                         const rtt = (t3 - t0) - (t2 - t1);
                         
-                        jamSocket.removeEventListener("message", tempListener);
+                        if (jamSocket) {
+                            try {
+                                jamSocket.removeEventListener("message", tempListener);
+                            } catch(e) {}
+                        }
                         resolve({ offset, rtt });
                     }
                 } catch(e) {}
@@ -658,7 +708,11 @@ async function runClockSync() {
             jamSocket.send(JSON.stringify({ type: "ping", t0: t0 }));
             
             setTimeout(() => {
-                jamSocket.removeEventListener("message", tempListener);
+                if (jamSocket) {
+                    try {
+                        jamSocket.removeEventListener("message", tempListener);
+                    } catch(e) {}
+                }
                 resolve(null);
             }, 1000);
         });

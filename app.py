@@ -127,6 +127,10 @@ def api_artist(channel_id: str):
 
 @app.get("/api/jam/create")
 def api_create_room(room_code: str, host: str):
+    if not host or not host.strip():
+        raise HTTPException(status_code=400, detail="Username cannot be empty")
+    if not room_code or not room_code.strip():
+        raise HTTPException(status_code=400, detail="Room code cannot be empty")
     room = create_room(room_code, host)
     return {"room_code": room.room_code, "host": room.host_username}
 
@@ -136,11 +140,15 @@ def api_list_rooms():
 
 @app.websocket("/api/jam/ws/{room_code}")
 async def jam_websocket_handler(websocket: WebSocket, room_code: str, username: str):
+    if not username or not username.strip():
+        await websocket.close(code=4003, reason="Username cannot be empty")
+        return
     code = room_code.upper().strip()
     room = get_room(code)
     if not room:
         room = create_room(code, username)
-    await room.connect(username, websocket)
+    if not await room.connect(username, websocket):
+        return
     try:
         while True:
             data_str = await websocket.receive_text()
