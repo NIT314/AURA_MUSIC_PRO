@@ -3290,11 +3290,12 @@ function loadPlaylistDetailPanel(pl) {
     if (visiblePlaylistTracks.length === 0) {
         tracksHTML = `<div class="empty-state"><p>No songs in this playlist yet. Add songs from Search using 3-dot menu.</p></div>`;
     } else {
-        visiblePlaylistTracks.forEach((track, idx) => {
+        visiblePlaylistTracks.forEach((track) => {
+            const originalIndex = pl.tracks.indexOf(track);
             tracksHTML += `
-                <div class="track-row">
+                <div class="track-row" onclick="if (event.target.closest('button')) return; playPlaylistTrack('${pl.id}', ${originalIndex})">
                     <div class="track-row-art"><img src="${track.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
-                    <div class="track-row-info" onclick="playPlaylistTrack('${pl.id}', ${idx})">
+                    <div class="track-row-info">
                         <h4>${safe(track.title)}</h4>
                         <p>${safe(track.artist)}</p>
                     </div>
