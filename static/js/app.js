@@ -2190,6 +2190,7 @@ function initLibraryPlaylistSystem() {
     renderLibraryLiked();
     renderLibraryDownloads();
     renderLibraryHistory();
+    renderHiddenSongs();
 
     // Sleep Timer modal trigger
     document.getElementById("player-sleep-timer-btn").addEventListener("click", toggleSleepTimerOptions);
@@ -3775,6 +3776,7 @@ async function handleActionSheetAction(action) {
             renderLibraryHistory();
             renderLocalSongs();
             renderQueueDrawer();
+            renderHiddenSongs();
             break;
             
         case "queue_add":
@@ -4364,3 +4366,61 @@ function initPlaybackOptionsDropdown() {
         hidePlaybackOptionsDropdown();
     });
 }
+
+function renderHiddenSongs() {
+    const container = document.getElementById("hidden-songs-list");
+    if (!container) return;
+    
+    if (hiddenTracks.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <i class="fa-solid fa-eye-slash"></i>
+                <p>No hidden songs in this session.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = "";
+    hiddenTracks.forEach(trackId => {
+        const track = findTrackById(trackId);
+        if (!track) return;
+        
+        const row = document.createElement("div");
+        row.className = "track-row";
+        row.innerHTML = `
+            <div class="track-row-art"><img src="${track.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
+            <div class="track-row-info">
+                <h4>${safe(track.title)}</h4>
+                <p>${safe(track.artist)}</p>
+            </div>
+            <div class="track-row-actions">
+                <button class="btn btn-gold btn-sm" onclick="unhideTrack('${safe(track.id)}')">
+                    <i class="fa-solid fa-eye"></i> Unhide
+                </button>
+            </div>
+        `;
+        container.appendChild(row);
+    });
+}
+
+window.unhideTrack = (trackId) => {
+    hiddenTracks = hiddenTracks.filter(id => id !== trackId);
+    renderHiddenSongs();
+    
+    // Refresh search results if active
+    const resultsView = document.getElementById("search-results-view");
+    if (resultsView && !resultsView.classList.contains("hide") && searchResultsCache) {
+        renderSearchResults(searchResultsCache);
+    }
+    
+    // Refresh library tab sub-panels
+    renderPlaylists();
+    renderLibraryLiked();
+    renderLibraryDownloads();
+    renderLibraryHistory();
+    renderLocalSongs();
+    renderQueueDrawer();
+    
+    showToast("Song unhidden");
+};

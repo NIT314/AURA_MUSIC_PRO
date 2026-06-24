@@ -214,6 +214,7 @@
                         <button class="lib-tab-btn" data-lib="downloads">Downloads</button>
                         <button class="lib-tab-btn" data-lib="history">History</button>
                         <button class="lib-tab-btn" data-lib="local">Local Files</button>
+                        <button class="lib-tab-btn" data-lib="hidden">Hidden</button>
                     </div>
                     <button class="btn btn-gold btn-sm" id="create-playlist-btn">
                         <i class="fa-solid fa-plus"></i> Create Playlist
@@ -287,6 +288,16 @@
                         <div class="empty-state">
                             <i class="fa-solid fa-file-audio"></i>
                             <p>No local files uploaded yet. Add audio files from your device!</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hidden Tracks Panel -->
+                <div id="lib-hidden" class="lib-sub-panel">
+                    <div class="songs-list-container" id="hidden-songs-list">
+                        <div class="empty-state">
+                            <i class="fa-solid fa-eye-slash"></i>
+                            <p>No hidden songs in this session.</p>
                         </div>
                     </div>
                 </div>
