@@ -2289,6 +2289,7 @@ function toggleLikeFromRow(e, trackId) {
     }
     
     const idx = likedSongs.findIndex(s => s.id === trackId);
+    const isNowLiked = idx === -1;
     if (idx !== -1) {
         likedSongs.splice(idx, 1);
         showToast("Removed from Liked Songs");
@@ -2301,10 +2302,36 @@ function toggleLikeFromRow(e, trackId) {
     updateLikedCount();
     renderLibraryLiked();
     
-    // Reload search views if active
-    const q = document.getElementById("search-input").value.trim();
-    if (q) {
-        performSearch(q, "songs");
+    // Update player heart icon if currently playing this track
+    if (currentLoadedTrack && currentLoadedTrack.id === trackId) {
+        const likeBtn = document.getElementById("player-like-btn");
+        const miniLikeBtn = document.getElementById("mini-like-btn");
+        if (likeBtn) {
+            if (isNowLiked) {
+                likeBtn.classList.add("active");
+                likeBtn.innerHTML = `<i class="fa-solid fa-heart"></i>`;
+            } else {
+                likeBtn.classList.remove("active");
+                likeBtn.innerHTML = `<i class="fa-regular fa-heart"></i>`;
+            }
+        }
+        if (miniLikeBtn) {
+            if (isNowLiked) {
+                miniLikeBtn.innerHTML = `<i class="fa-solid fa-heart" style="color:var(--purple);"></i>`;
+            } else {
+                miniLikeBtn.innerHTML = `<i class="fa-regular fa-heart"></i>`;
+            }
+        }
+    }
+    
+    // Update action sheet like item directly if currently open for this track
+    const likeItem = document.querySelector('.action-item[data-action="like"]');
+    if (likeItem && currentActionMenuTrack && currentActionMenuTrack.id === trackId) {
+        if (isNowLiked) {
+            likeItem.innerHTML = `<i class="fa-solid fa-heart" style="color:var(--purple);"></i> Remove from Liked Songs`;
+        } else {
+            likeItem.innerHTML = `<i class="fa-regular fa-heart"></i> Add to Liked Songs`;
+        }
     }
 }
 
@@ -3738,9 +3765,9 @@ async function handleActionSheetAction(action) {
         case "hide":
             hiddenTracks.push(track.id);
             showToast(`"${track.title}" hidden in this session.`);
-            const q = document.getElementById("search-input").value.trim();
-            if (q) {
-                performSearch(q, "songs");
+            const resultsView = document.getElementById("search-results-view");
+            if (resultsView && !resultsView.classList.contains("hide") && searchResultsCache) {
+                renderSearchResults(searchResultsCache);
             }
             renderPlaylists();
             renderLibraryLiked();
