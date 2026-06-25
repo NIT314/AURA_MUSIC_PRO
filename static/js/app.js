@@ -39,6 +39,7 @@ let currentQueueIndex = -1;
 let currentLoadedTrack = null;
 let playbackHistory = [];
 let skippedTracks = [];
+let infiniteQueue = [];
 let likedSongs = [];
 let downloadedSongs = [];
 let searchHistory = [];
@@ -1155,8 +1156,22 @@ function onSongPlayStateChange(isPlaying) {
 }
 
 window.playSingleSong = playSingleSong;
-async function playSingleSong(track, autoplay = true, fromJamSync = false) {
+async function playSingleSong(track, autoplay = true, fromJamSync = false, keepInfiniteQueue = false) {
     if (!track) return;
+
+    if (!keepInfiniteQueue) {
+        infiniteQueue = [];
+    }
+
+    // Update currentQueueIndex if the played track is not the one at currentQueueIndex in playerQueue
+    if (currentQueueIndex === -1 || !playerQueue[currentQueueIndex] || playerQueue[currentQueueIndex].id !== track.id) {
+        const qIdx = playerQueue.findIndex(t => t.id === track.id);
+        if (qIdx !== -1) {
+            currentQueueIndex = qIdx;
+        } else {
+            currentQueueIndex = -1;
+        }
+    }
 
     // Check if the previous song was skipped (played for less than 10 seconds and not ended naturally)
     if (currentLoadedTrack && audio.currentTime < 10 && !audio.ended && track.id !== currentLoadedTrack.id) {
@@ -1487,8 +1502,6 @@ function playNextTrack(isManualSkip = false) {
         return;
     }
 
-    if (playerQueue.length === 0) return;
-
     // Repeat Track behavior (only on natural ended, not manual skip)
     if (repeatMode === "track" && !isManualSkip) {
         audio.currentTime = 0;
@@ -1498,23 +1511,73 @@ function playNextTrack(isManualSkip = false) {
         return;
     }
 
-    const nextIndex = getNextTrackIndex(isManualSkip);
-    if (nextIndex === null) {
-        // Stop playback cleanly
-        audio.pause();
-        onSongPlayStateChange(false);
-        return;
+    let nextIndex = null;
+    if (playerQueue.length > 0) {
+        nextIndex = getNextTrackIndex(isManualSkip);
     }
 
-    if (crossfadeDuration > 0) {
-        fadeOutAndPlayNext(nextIndex);
+    if (nextIndex !== null) {
+        if (crossfadeDuration > 0) {
+            fadeOutAndPlayNext(nextIndex);
+        } else {
+            currentQueueIndex = nextIndex;
+            playSingleSong(playerQueue[currentQueueIndex]);
+        }
     } else {
-        currentQueueIndex = nextIndex;
-        playSingleSong(playerQueue[currentQueueIndex]);
+        playInfiniteNextTrack();
     }
 }
 
-function fadeOutAndPlayNext(targetIndex) {
+async function playInfiniteNextTrack() {
+    currentQueueIndex = -1;
+
+    let nextTrack = null;
+    if (infiniteQueue && infiniteQueue.length > 0) {
+        nextTrack = infiniteQueue.shift();
+    } else {
+        try {
+            showToast("Fetching infinite recommendations... ⚡");
+            const profile = {
+                current_video_id: currentLoadedTrack ? currentLoadedTrack.id : "",
+                session_history: playbackHistory.slice(0, 10).map(s => ({ id: s.id, artistId: s.artistId || "" })),
+                global_history: playbackHistory.map(s => ({ id: s.id, artistId: s.artistId || "" })),
+                skipped_tracks: skippedTracks,
+                excluded_tracks: excludedFromRecommendations
+            };
+            const res = await fetch(`/api/recommendations?profile=${encodeURIComponent(JSON.stringify(profile))}`);
+            let recommendations = await res.json();
+            
+            if (Array.isArray(recommendations)) {
+                recommendations = recommendations.filter(track => !excludedFromRecommendations.includes(track.id));
+            }
+
+            if (recommendations && recommendations.length > 0) {
+                nextTrack = recommendations[0];
+                if (recommendations.length > 1) {
+                    infiniteQueue = recommendations.slice(1);
+                } else {
+                    infiniteQueue = [];
+                }
+            }
+        } catch (e) {
+            console.error("Failed to load infinite recommendations:", e);
+        }
+    }
+
+    if (nextTrack) {
+        if (crossfadeDuration > 0) {
+            fadeOutAndPlayNext(nextTrack);
+        } else {
+            playSingleSong(nextTrack, true, false, true);
+        }
+    } else {
+        showToast("No further recommendations available.");
+        audio.pause();
+        onSongPlayStateChange(false);
+    }
+}
+
+function fadeOutAndPlayNext(targetTrackOrIndex) {
     if (crossfadeIntervalId) {
         clearInterval(crossfadeIntervalId);
         crossfadeIntervalId = null;
@@ -1523,11 +1586,19 @@ function fadeOutAndPlayNext(targetIndex) {
     
     // Check if the track has naturally ended or is extremely close to ending
     if (audio.ended || audio.currentTime === 0 || audio.currentTime >= audio.duration - 0.5) {
-        currentQueueIndex = targetIndex;
-        const nextTrack = playerQueue[currentQueueIndex];
+        let nextTrack;
+        let isInfinite = false;
+        if (typeof targetTrackOrIndex === "number") {
+            currentQueueIndex = targetTrackOrIndex;
+            nextTrack = playerQueue[currentQueueIndex];
+        } else {
+            currentQueueIndex = -1;
+            nextTrack = targetTrackOrIndex;
+            isInfinite = true;
+        }
         
         audio.volume = 0;
-        playSingleSong(nextTrack);
+        playSingleSong(nextTrack, true, false, isInfinite);
         
         let fadeInterval = (crossfadeDuration * 1000) / 10;
         crossfadeIntervalId = setInterval(() => {
@@ -1549,8 +1620,18 @@ function fadeOutAndPlayNext(targetIndex) {
             clearInterval(crossfadeIntervalId);
             crossfadeIntervalId = null;
             audio.volume = 0.8; // Reset volume for next song
-            currentQueueIndex = targetIndex;
-            playSingleSong(playerQueue[currentQueueIndex]);
+            
+            let nextTrack;
+            let isInfinite = false;
+            if (typeof targetTrackOrIndex === "number") {
+                currentQueueIndex = targetTrackOrIndex;
+                nextTrack = playerQueue[currentQueueIndex];
+            } else {
+                currentQueueIndex = -1;
+                nextTrack = targetTrackOrIndex;
+                isInfinite = true;
+            }
+            playSingleSong(nextTrack, true, false, isInfinite);
         }
     }, fadeInterval);
 }
@@ -1564,28 +1645,42 @@ function playPrevTrack() {
         return;
     }
     
-    if (playerQueue.length === 0) return;
-    
-    let prevIndex;
-    if (isShuffleOn) {
-        checkShuffleOrder();
-        let currentPos = shuffledQueueOrder.indexOf(currentQueueIndex);
-        if (currentPos === -1) currentPos = 0;
-        
-        let prevPos = currentPos - 1;
-        if (prevPos < 0) {
-            prevPos = shuffledQueueOrder.length - 1;
+    if (playerQueue.length > 0 && currentQueueIndex !== -1) {
+        let prevIndex;
+        if (isShuffleOn) {
+            checkShuffleOrder();
+            let currentPos = shuffledQueueOrder.indexOf(currentQueueIndex);
+            if (currentPos === -1) currentPos = 0;
+            
+            let prevPos = currentPos - 1;
+            if (prevPos < 0) {
+                prevPos = shuffledQueueOrder.length - 1;
+            }
+            prevIndex = shuffledQueueOrder[prevPos];
+        } else {
+            prevIndex = currentQueueIndex - 1;
+            if (prevIndex < 0) {
+                prevIndex = playerQueue.length - 1;
+            }
         }
-        prevIndex = shuffledQueueOrder[prevPos];
+        
+        currentQueueIndex = prevIndex;
+        playSingleSong(playerQueue[currentQueueIndex]);
     } else {
-        prevIndex = currentQueueIndex - 1;
-        if (prevIndex < 0) {
-            prevIndex = playerQueue.length - 1;
+        // Fallback to playbackHistory if explicit queue is empty or not in use
+        if (playbackHistory.length > 1) {
+            let historyIndex = playbackHistory.findIndex(s => s.id === (currentLoadedTrack ? currentLoadedTrack.id : ""));
+            if (historyIndex === -1) historyIndex = 0;
+            const prevTrack = playbackHistory[historyIndex + 1];
+            if (prevTrack) {
+                playSingleSong(prevTrack);
+            } else {
+                showToast("No previous tracks in history.");
+            }
+        } else {
+            showToast("No previous tracks in history.");
         }
     }
-    
-    currentQueueIndex = prevIndex;
-    playSingleSong(playerQueue[currentQueueIndex]);
 }
 
 function reverseQueueOrder() {
@@ -3152,9 +3247,6 @@ async function loadHomeData() {
                 if (window.isInsideJam && window.isInsideJam()) {
                     showJamSelectionMenu(item);
                 } else {
-                    // Set current queue to these elements
-                    playerQueue = trendData;
-                    currentQueueIndex = trendData.findIndex(s => s.id === item.id);
                     playSingleSong(item);
                 }
             });
@@ -3184,8 +3276,6 @@ async function loadHomeData() {
                 if (window.isInsideJam && window.isInsideJam()) {
                     showJamSelectionMenu(item);
                 } else {
-                    playerQueue = newData;
-                    currentQueueIndex = newData.findIndex(s => s.id === item.id);
                     playSingleSong(item);
                 }
             });
@@ -3215,8 +3305,6 @@ function renderHomeCards(data, container) {
             if (window.isInsideJam && window.isInsideJam()) {
                 showJamSelectionMenu(item);
             } else {
-                playerQueue = data;
-                currentQueueIndex = data.findIndex(s => s.id === item.id);
                 playSingleSong(item);
             }
         });
@@ -3265,9 +3353,9 @@ document.getElementById("start-aura-flow-btn").addEventListener("click", async (
                     showToast(`AURA Flow started. Queued ${recommendations.length - 1} recommendations! 🎶`);
                 }
             } else {
-                playerQueue = recommendations;
-                currentQueueIndex = 0;
-                playSingleSong(recommendations[0]);
+                currentQueueIndex = -1;
+                playSingleSong(recommendations[0], true, false, true);
+                infiniteQueue = recommendations.slice(1);
             }
             
             // Show DJ dialog
@@ -3315,9 +3403,9 @@ moodCards.forEach(card => {
                         showToast(`Started Mood Station. Queued ${tracks.length - 1} tracks! 🎶`);
                     }
                 } else {
-                    playerQueue = tracks;
-                    currentQueueIndex = 0;
-                    playSingleSong(tracks[0]);
+                    currentQueueIndex = -1;
+                    playSingleSong(tracks[0], true, false, true);
+                    infiniteQueue = tracks.slice(1);
                 }
             } else {
                 showToast(`No tracks found for mood '${mood}' after exclusions.`);
@@ -3716,6 +3804,7 @@ async function handleLocalFilesUpload(e) {
 // Track Finder robust fallback
 function findTrackById(trackId) {
     let track = playerQueue.find(s => s.id === trackId) || 
+                (typeof infiniteQueue !== 'undefined' && infiniteQueue.find(s => s.id === trackId)) ||
                 searchResultsCache.find(s => s.id === trackId) || 
                 downloadedSongs.find(s => s.id === trackId) || 
                 likedSongs.find(s => s.id === trackId) ||
@@ -4020,9 +4109,9 @@ async function handleActionSheetAction(action) {
                 }
                 
                 if (recommendations && recommendations.length > 0) {
-                    playerQueue = recommendations;
-                    currentQueueIndex = 0;
-                    playSingleSong(recommendations[0]);
+                    currentQueueIndex = -1;
+                    playSingleSong(recommendations[0], true, false, true);
+                    infiniteQueue = recommendations.slice(1);
                 } else {
                     showToast("No recommendations available for radio after exclusions.");
                 }
