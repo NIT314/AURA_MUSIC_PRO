@@ -50,6 +50,16 @@ class JamRoom:
 
     async def connect(self, username: str, websocket: WebSocket):
         if username in self.active_connections:
+            # Must accept first, then close — otherwise the custom close code never reaches the browser
+            await websocket.accept()
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "code": 4001,
+                    "reason": "Username already taken"
+                }))
+            except Exception:
+                pass
             await websocket.close(code=4001, reason="Username already taken")
             return False
         await websocket.accept()
@@ -235,7 +245,7 @@ class JamRoom:
 
     async def remove_from_queue(self, username: str, song_id: str):
         if not self.has_permission(username, "remove_queue"):
-            if self.add_only_mode and self.get_role(username) == "listener":
+            if not self.add_only_mode and self.get_role(username) == "listener":
                 return
             own_song = False
             for item in self.queue:
@@ -322,6 +332,36 @@ class JamRoom:
                 "sender": username
             })
 
+    async def skip_to_prev(self, username: str):
+        if not self.has_permission(username, "control_playback"):
+            return
+        if self.queue:
+            current_id = self.current_track.get("id") if self.current_track else None
+            prev_index = len(self.queue) - 1  # Default to last track (wrap around)
+            if current_id:
+                for idx, item in enumerate(self.queue):
+                    if item["id"] == current_id:
+                        prev_index = idx - 1
+                        break
+            if prev_index < 0:
+                prev_index = len(self.queue) - 1  # Wrap to last song
+            prev_song = self.queue[prev_index]
+            self.current_track = prev_song
+            self.playback_state = "PLAYING"
+            self.playback_time = 0.0
+            self.last_updated = time.time()
+            await self.add_chat_msg("System", f"Playing previous track: '{prev_song['title']}'", msg_type="system")
+            await self.broadcast({
+                "type": "playback_sync",
+                "video_id": prev_song["id"],
+                "state": "PLAYING",
+                "position": 0.0,
+                "track": self.current_track,
+                "server_time": time.time() * 1000,
+                "sender": username
+            })
+            await self.broadcast_state()
+
     async def add_chat_msg(self, username: str, text: str, msg_type: str = "chat"):
         msg = {
             "username": username,
@@ -406,7 +446,7 @@ class JamRoom:
     async def broadcast(self, message: dict):
         message_str = json.dumps(message)
         disconnected_users = []
-        for username, ws in self.active_connections.items():
+        for username, ws in list(self.active_connections.items()):
             try:
                 await ws.send_text(message_str)
             except Exception:

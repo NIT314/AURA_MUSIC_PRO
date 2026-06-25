@@ -3400,13 +3400,26 @@ input:checked + .slider-round:before {
     z-index: 1000;
     position: relative;
     background: rgba(255, 255, 255, 0.15) !important;
-    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5), 0 0 15px rgba(223, 193, 93, 0.15);
     border-color: rgba(223, 193, 93, 0.5) !important;
     pointer-events: none;
+    border-radius: 12px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .queue-dragging-active .track-row:not(.row-dragging) {
-    transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1) !important;
+    transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1), border-color 0.15s ease !important;
+}
+
+/* Drop target indicator lines */
+.track-row.drag-over-above {
+    border-top: 2px solid var(--gold, #dfc15d) !important;
+    margin-top: -1px;
+}
+
+.track-row.drag-over-below {
+    border-bottom: 2px solid var(--gold, #dfc15d) !important;
+    margin-bottom: -1px;
 }
 
 /* Touch Action Optimization on Drag Handle */

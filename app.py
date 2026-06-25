@@ -109,9 +109,9 @@ async def api_lyrics(video_id: str, title: str, artist: str, duration: int = 0):
     return await fetch_lyrics(video_id, title, artist, duration)
 
 @app.get("/api/recommendations")
-def api_recommendations(video_id: str = None, history: str = None):
+async def api_recommendations(video_id: str = None, history: str = None, profile: str = None):
     history_ids = history.split(",") if history else []
-    return get_ai_recommendations(history_ids, video_id)
+    return await get_ai_recommendations(history_ids, video_id, profile_json=profile)
 
 @app.get("/api/mood")
 def api_mood(mood: str):
@@ -181,6 +181,8 @@ async def jam_websocket_handler(websocket: WebSocket, room_code: str, username: 
                     await room.reorder_queue(username, queue_ids)
             elif msg_type == "skip_to_next":
                 await room.skip_to_next(username)
+            elif msg_type == "skip_to_prev":
+                await room.skip_to_prev(username)
             elif msg_type == "chat":
                 text = data.get("message", "")
                 if text:

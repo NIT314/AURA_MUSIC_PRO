@@ -38,6 +38,7 @@ let playerQueue = [];
 let currentQueueIndex = -1;
 let currentLoadedTrack = null;
 let playbackHistory = [];
+let skippedTracks = [];
 let likedSongs = [];
 let downloadedSongs = [];
 let searchHistory = [];
@@ -295,6 +296,12 @@ function restoreStateFromStorage() {
     } catch (e) {
         console.error("Storage restore failed for excludedFromRecommendations:", e);
         excludedFromRecommendations = [];
+    }
+    try {
+        skippedTracks = JSON.parse(localStorage.getItem("aura_skipped_tracks")) || [];
+    } catch (e) {
+        console.error("Storage restore failed for skippedTracks:", e);
+        skippedTracks = [];
     }
     try {
         repeatMode = localStorage.getItem("aura_repeat_mode") || "off";
@@ -1151,6 +1158,17 @@ window.playSingleSong = playSingleSong;
 async function playSingleSong(track, autoplay = true, fromJamSync = false) {
     if (!track) return;
 
+    // Check if the previous song was skipped (played for less than 10 seconds and not ended naturally)
+    if (currentLoadedTrack && audio.currentTime < 10 && !audio.ended && track.id !== currentLoadedTrack.id) {
+        if (!skippedTracks.includes(currentLoadedTrack.id)) {
+            skippedTracks.unshift(currentLoadedTrack.id);
+            if (skippedTracks.length > 50) {
+                skippedTracks.pop();
+            }
+            saveStateToStorage("aura_skipped_tracks", skippedTracks);
+        }
+    }
+
     // Reset playback rate in case it was modified by Jam mode sync
     audio.playbackRate = 1.0;
 
@@ -1200,8 +1218,11 @@ async function playSingleSong(track, autoplay = true, fromJamSync = false) {
         navigator.mediaSession.setActionHandler('pause', () => { 
             audio.pause(); onSongPlayStateChange(false); 
         });
-        navigator.mediaSession.setActionHandler('previoustrack', playerQueue.length > 0 ? playPrevTrack : null);
-        navigator.mediaSession.setActionHandler('nexttrack', playerQueue.length > 0 ? () => playNextTrack(true) : null);
+        const inJam = window.isInsideJam && window.isInsideJam();
+        const canPrev = inJam || playerQueue.length > 0;
+        const canNext = inJam || playerQueue.length > 0;
+        navigator.mediaSession.setActionHandler('previoustrack', canPrev ? playPrevTrack : null);
+        navigator.mediaSession.setActionHandler('nexttrack', canNext ? () => playNextTrack(true) : null);
     }
     // ===============================================
     document.getElementById("mini-artist").innerText = track.artist;
@@ -1535,7 +1556,13 @@ function fadeOutAndPlayNext(targetIndex) {
 }
 
 function playPrevTrack() {
-    if (window.isInsideJam()) return; // Ignored inside co-listening room
+    // If inside Jam, the prev track is handled by room's queue!
+    if (window.isInsideJam()) {
+        if (window.getJamRole() === 'host' || window.getJamRole() === 'co-host') {
+            window.sendJamSkipToPrev();
+        }
+        return;
+    }
     
     if (playerQueue.length === 0) return;
     
@@ -3201,12 +3228,16 @@ function renderHomeCards(data, container) {
 document.getElementById("start-aura-flow-btn").addEventListener("click", async () => {
     showToast("AURA Flow AI DJ suggestions triggered ⚡");
     
-    // Build comma history ids
-    const historyIds = playbackHistory.map(s => s.id).slice(0, 5).join(",");
-    let videoIdParam = currentLoadedTrack ? currentLoadedTrack.id : "";
-    
     try {
-        const res = await fetch(`/api/recommendations?video_id=${videoIdParam}&history=${historyIds}`);
+        // Build taste profile payload
+        const profile = {
+            current_video_id: currentLoadedTrack ? currentLoadedTrack.id : "",
+            session_history: playbackHistory.slice(0, 10).map(s => ({ id: s.id, artistId: s.artistId || "" })),
+            global_history: playbackHistory.map(s => ({ id: s.id, artistId: s.artistId || "" })),
+            skipped_tracks: skippedTracks,
+            excluded_tracks: excludedFromRecommendations
+        };
+        const res = await fetch(`/api/recommendations?profile=${encodeURIComponent(JSON.stringify(profile))}`);
         let recommendations = await res.json();
         
         // Filter out excluded tracks

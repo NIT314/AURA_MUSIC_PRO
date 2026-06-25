@@ -3,6 +3,75 @@
   Handles Playback Synchronization, Latency Drift Correction, Shared Queues, Chat & Reactions.
 */
 
+class JitterBuffer {
+    constructor(size = 10) {
+        this.size = size;
+        this.values = [];
+    }
+    add(value) {
+        this.values.push(value);
+        if (this.values.length > this.size) {
+            this.values.shift();
+        }
+    }
+    getMedian() {
+        if (this.values.length === 0) return 0;
+        const sorted = [...this.values].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        if (sorted.length % 2 !== 0) {
+            return sorted[mid];
+        }
+        return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+}
+
+const transmissionJitterBuffer = new JitterBuffer(10);
+let currentMedianRTT = 0;
+
+let targetPlaybackRate = 1.0;
+let currentPlaybackRate = 1.0;
+let rateRampActive = false;
+
+function updatePlaybackRateRamp() {
+    const audio = document.getElementById("audio-element");
+    if (!audio) {
+        rateRampActive = false;
+        return;
+    }
+    
+    const diff = targetPlaybackRate - currentPlaybackRate;
+    if (Math.abs(diff) > 0.001) {
+        const step = 0.002; // very smooth transition (0.2% change per tick)
+        if (diff > 0) {
+            currentPlaybackRate = Math.min(targetPlaybackRate, currentPlaybackRate + step);
+        } else {
+            currentPlaybackRate = Math.max(targetPlaybackRate, currentPlaybackRate - step);
+        }
+        
+        if (Math.abs(audio.playbackRate - currentPlaybackRate) > 0.001) {
+            audio.playbackRate = currentPlaybackRate;
+            console.log(`Ramping playbackRate: ${audio.playbackRate.toFixed(4)}`);
+        }
+        requestAnimationFrame(updatePlaybackRateRamp);
+    } else {
+        currentPlaybackRate = targetPlaybackRate;
+        audio.playbackRate = currentPlaybackRate;
+        rateRampActive = false;
+    }
+}
+
+function setTargetPlaybackRate(rate) {
+    targetPlaybackRate = rate;
+    const audio = document.getElementById("audio-element");
+    if (audio) {
+        currentPlaybackRate = audio.playbackRate;
+    }
+    if (!rateRampActive) {
+        rateRampActive = true;
+        updatePlaybackRateRamp();
+    }
+}
+
 let jamSocket = null;
 let currentRoomCode = "";
 let currentUsername = "";
@@ -164,6 +233,16 @@ function exitJamUI() {
     currentUserRole = "listener";
     jamShouldReconnect = false;
     jamReconnectAttempts = 0;
+    
+    // Reset playback rate ramping variables
+    targetPlaybackRate = 1.0;
+    currentPlaybackRate = 1.0;
+    rateRampActive = false;
+    const audio = document.getElementById("audio-element");
+    if (audio) {
+        audio.playbackRate = 1.0;
+    }
+    
     document.getElementById("jam-lobby-view").classList.remove("hide");
     document.getElementById("jam-room-view").classList.add("hide");
     document.getElementById("player-queue-toggle-btn").style.opacity = "1";
@@ -252,6 +331,13 @@ function sendJamSkipToNext() {
     }));
 }
 
+function sendJamSkipToPrev() {
+    if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+    jamSocket.send(JSON.stringify({
+        type: "skip_to_prev"
+    }));
+}
+
 function sendJamChatMessage(msg) {
     if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
     jamSocket.send(JSON.stringify({
@@ -293,6 +379,13 @@ function handleJamWSMessage(data) {
         
         syncLocalPlayback(data);
     } 
+    else if (type === "error") {
+        showToast(data.reason || "An error occurred.");
+        if (data.code === 4001) {
+            jamShouldReconnect = false;
+            exitJamUI();
+        }
+    }
     else if (type === "chat_message") {
         appendJamChatMessage(data.message);
     } 
@@ -399,112 +492,146 @@ function updateJamRoomUI(state) {
 
     // 4. Render Queue
     const queueContainer = document.getElementById("jam-queue-list");
-    queueContainer.innerHTML = "";
-    
-    if (state.queue.length === 0) {
-        queueContainer.innerHTML = `<div class="empty-queue-msg">Queue is empty. Find songs in Search!</div>`;
+    if (draggingElement) {
+        console.log("Drag in progress, skipping queue render to prevent interruption.");
     } else {
-        const canControl = currentUserRole === "host" || currentUserRole === "co-host";
-        const isActiveTrack = (item) => {
-            return state.playback.current_track && state.playback.current_track.id === item.id;
-        };
-
-        state.queue.forEach((item, idx) => {
-            const row = document.createElement("div");
-            const active = isActiveTrack(item);
-            row.className = `track-row ${active ? 'active-track' : ''}`;
-            
-            let dragHandleHTML = "";
-            let menuBtnHTML = "";
-            
-            if (canControl) {
-                row.draggable = true;
-                row.setAttribute('data-id', item.id);
-                
-                // HTML5 Drag and Drop events
-                row.addEventListener('dragstart', (e) => {
-                    draggingElement = row;
-                    row.classList.add('dragging');
-                    e.dataTransfer.effectAllowed = 'move';
-                });
-                row.addEventListener('dragend', () => {
-                    row.classList.remove('dragging');
-                    draggingElement = null;
-                    const rows = Array.from(queueContainer.querySelectorAll('.track-row'));
-                    const newIds = rows.map(r => r.getAttribute('data-id'));
-                    if (window.sendJamReorderQueue) {
-                        window.sendJamReorderQueue(newIds);
-                    }
-                });
-                row.addEventListener('dragover', (e) => {
-                    e.preventDefault();
-                    if (!draggingElement || draggingElement === row) return;
-                    
-                    const bounding = row.getBoundingClientRect();
-                    const offset = e.clientY - bounding.top - (bounding.height / 2);
-                    if (offset > 0) {
-                        row.after(draggingElement);
-                    } else {
-                        row.before(draggingElement);
-                    }
-                });
-
-                dragHandleHTML = `
-                    <button class="track-drag-handle" onclick="event.stopPropagation();" title="Drag to reorder">
-                        <i class="fa-solid fa-grip-lines"></i>
-                    </button>
-                `;
-                menuBtnHTML = `
-                    <button class="track-menu-btn" onclick="openTrackActionMenu(event, '${item.id}', {type: 'jam_queue'})">
-                        <i class="fa-solid fa-ellipsis-vertical"></i>
-                    </button>
-                `;
-            }
-
-            row.onclick = (event) => {
-                if (event.target.closest("button")) return;
-                
-                const role = window.getJamRole ? window.getJamRole() : 'listener';
-                if (role !== 'host' && role !== 'co-host') {
-                    showToast("🎵 Only Host or Co-Host can change songs in Jam");
-                    return;
-                }
-                
-                // Directly play and sync the song!
-                if (window.playSingleSong) {
-                    window.playSingleSong(item);
-                } else if (typeof playSingleSong !== 'undefined') {
-                    playSingleSong(item);
-                }
-                
-                if (window.isInsideJam && window.isInsideJam()) {
-                    if (window.sendJamPlaybackUpdate) {
-                        setTimeout(() => {
-                            window.sendJamPlaybackUpdate(
-                                item.id,
-                                "PLAYING",
-                                0,
-                                item
-                            );
-                        }, 800);
-                    }
-                }
+        queueContainer.innerHTML = "";
+        
+        if (state.queue.length === 0) {
+            queueContainer.innerHTML = `<div class="empty-queue-msg">Queue is empty. Find songs in Search!</div>`;
+        } else {
+            const canControl = currentUserRole === "host" || currentUserRole === "co-host";
+            const isActiveTrack = (item) => {
+                return state.playback.current_track && state.playback.current_track.id === item.id;
             };
 
-            row.innerHTML = `
-                <div class="track-row-art"><img src="${item.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
-                <div class="track-row-info">
-                    <h4 style="${active ? 'color: var(--gold);' : ''}">${escapeHTML(item.title)}</h4>
-                    <p>${escapeHTML(item.artist)} • <span style="font-size:10px; color:var(--text-muted);">Added by ${escapeHTML(item.submitted_by)}</span></p>
-                </div>
-                <div class="track-row-actions">
-                    <span class="track-duration-badge">${item.duration}</span>
-                    ${menuBtnHTML}
-                    ${dragHandleHTML}
-                </div>
-            `;
-            queueContainer.appendChild(row);
-        });
+            state.queue.forEach((item, idx) => {
+                const row = document.createElement("div");
+                const active = isActiveTrack(item);
+                row.className = `track-row ${active ? 'active-track' : ''}`;
+                
+                let dragHandleHTML = "";
+                let menuBtnHTML = "";
+                
+                if (canControl) {
+                    row.draggable = true;
+                    row.setAttribute('data-id', item.id);
+                    
+                    // HTML5 Drag and Drop events
+                    row.addEventListener('dragstart', (e) => {
+                        draggingElement = row;
+                        row.classList.add('row-dragging');
+                        queueContainer.classList.add('queue-dragging-active');
+                        e.dataTransfer.effectAllowed = 'move';
+                        // Slight delay to allow the browser to snapshot the drag ghost
+                        requestAnimationFrame(() => {
+                            row.style.opacity = '0.4';
+                        });
+                    });
+                    row.addEventListener('dragend', () => {
+                        row.classList.remove('row-dragging');
+                        row.style.opacity = '';
+                        queueContainer.classList.remove('queue-dragging-active');
+                        // Remove any leftover drop indicators
+                        queueContainer.querySelectorAll('.track-row').forEach(r => {
+                            r.classList.remove('drag-over-above', 'drag-over-below');
+                        });
+                        draggingElement = null;
+                        const rows = Array.from(queueContainer.querySelectorAll('.track-row'));
+                        const newIds = rows.map(r => r.getAttribute('data-id'));
+                        if (window.sendJamReorderQueue) {
+                            window.sendJamReorderQueue(newIds);
+                        }
+                    });
+                    row.addEventListener('dragover', (e) => {
+                        e.preventDefault();
+                        if (!draggingElement || draggingElement === row) return;
+                        
+                        const bounding = row.getBoundingClientRect();
+                        const offset = e.clientY - bounding.top - (bounding.height / 2);
+                        
+                        // Clear previous indicators on other rows
+                        queueContainer.querySelectorAll('.track-row').forEach(r => {
+                            if (r !== row) {
+                                r.classList.remove('drag-over-above', 'drag-over-below');
+                            }
+                        });
+                        
+                        if (offset > 0) {
+                            row.classList.remove('drag-over-above');
+                            row.classList.add('drag-over-below');
+                            if (row.nextSibling !== draggingElement) {
+                                row.after(draggingElement);
+                            }
+                        } else {
+                            row.classList.remove('drag-over-below');
+                            row.classList.add('drag-over-above');
+                            if (row.previousSibling !== draggingElement) {
+                                row.before(draggingElement);
+                            }
+                        }
+                    });
+                    row.addEventListener('dragleave', () => {
+                        row.classList.remove('drag-over-above', 'drag-over-below');
+                    });
+
+                    dragHandleHTML = `
+                        <button class="track-drag-handle" onclick="event.stopPropagation();" title="Drag to reorder">
+                            <i class="fa-solid fa-grip-lines"></i>
+                        </button>
+                    `;
+                    menuBtnHTML = `
+                        <button class="track-menu-btn" onclick="openTrackActionMenu(event, '${item.id}', {type: 'jam_queue'})">
+                            <i class="fa-solid fa-ellipsis-vertical"></i>
+                        </button>
+                    `;
+                }
+
+                row.onclick = (event) => {
+                    if (event.target.closest("button")) return;
+                    
+                    const role = window.getJamRole ? window.getJamRole() : 'listener';
+                    if (role !== 'host' && role !== 'co-host') {
+                        showToast("🎵 Only Host or Co-Host can change songs in Jam");
+                        return;
+                    }
+                    
+                    // Directly play and sync the song!
+                    if (window.playSingleSong) {
+                        window.playSingleSong(item);
+                    } else if (typeof playSingleSong !== 'undefined') {
+                        playSingleSong(item);
+                    }
+                    
+                    if (window.isInsideJam && window.isInsideJam()) {
+                        if (window.sendJamPlaybackUpdate) {
+                            setTimeout(() => {
+                                window.sendJamPlaybackUpdate(
+                                    item.id,
+                                    "PLAYING",
+                                    0,
+                                    item
+                                );
+                            }, 800);
+                        }
+                    }
+                };
+
+                row.innerHTML = `
+                    <div class="track-row-art"><img src="${item.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
+                    <div class="track-row-info">
+                        <h4 style="${active ? 'color: var(--gold);' : ''}">${escapeHTML(item.title)}</h4>
+                        <p>${escapeHTML(item.artist)} • <span style="font-size:10px; color:var(--text-muted);">Added by ${escapeHTML(item.submitted_by)}</span></p>
+                    </div>
+                    <div class="track-row-actions">
+                        <span class="track-duration-badge">${item.duration}</span>
+                        ${menuBtnHTML}
+                        ${dragHandleHTML}
+                    </div>
+                `;
+                queueContainer.appendChild(row);
+            });
+        }
     }
 
     // 5. If my playback is completely empty and room has a playing song, sync it initial
@@ -513,7 +640,10 @@ function updateJamRoomUI(state) {
         // Wait, the client handles loading the song and seeking via syncLocalPlayback.
         // We trigger it initially if no song is loaded or IDs differ
         const loadedTrack = window.currentLoadedTrack;
-        if (!loadedTrack || loadedTrack.id !== state.playback.current_track.id) {
+        const audio = document.getElementById("audio-element");
+        const stateMismatch = audio ? (audio.paused !== (state.playback.state === "PAUSED")) : false;
+        
+        if (!loadedTrack || loadedTrack.id !== state.playback.current_track.id || stateMismatch) {
             syncLocalPlayback({
                 video_id: state.playback.current_track.id,
                 state: state.playback.state,
@@ -554,12 +684,21 @@ function syncLocalPlayback(data) {
     if (!targetVideoId) {
         if (!audio.paused) audio.pause();
         if (window.onSongPlayStateChange) window.onSongPlayStateChange(false);
+        setTargetPlaybackRate(1.0);
         return;
     }
 
-    // 1. Calculate Latency/Drift Compensation using clockOffset
+    // Guard against buffering/seeking state
+    if (audio.seeking || audio.readyState < 3) {
+        console.log("Audio is buffering or seeking, skipping sync alignment.");
+        return;
+    }
+
+    // 1. Calculate Latency/Drift Compensation using clockOffset and rolling Jitter Buffer
     const now = Date.now();
-    const transmissionDelay = Math.max(0, (now + clockOffset) - data.server_time) / 1000.0;
+    const rawDelay = Math.max(0, (now + clockOffset) - data.server_time) / 1000.0;
+    transmissionJitterBuffer.add(rawDelay);
+    const transmissionDelay = transmissionJitterBuffer.getMedian();
     
     let compensatedTarget = targetPosition;
     if (targetState === "PLAYING") {
@@ -569,6 +708,7 @@ function syncLocalPlayback(data) {
     // Check if song needs to change
     if (!currentSong || currentSong.id !== targetVideoId) {
         showToast(`Syncing song: ${data.track.title}`);
+        setTargetPlaybackRate(1.0);
         if (window.playSongById) {
             window.playSongById(targetVideoId, data.track, compensatedTarget, targetState === "PLAYING");
         }
@@ -585,23 +725,42 @@ function syncLocalPlayback(data) {
         }
         
         // Align timestamps (drift thresholds)
-        const drift = Math.abs(audio.currentTime - compensatedTarget);
-        if (drift > 0.150) { // 150ms drift limit
-            console.log(`Playback drift detected (${Math.round(drift*1000)}ms). Aligning...`);
-            
-            // Perform silent latency correction:
-            // If drift is minor (e.g. <500ms), we can speed up/slow down rate, else hard seek
-            if (drift < 1.0) {
-                if (audio.currentTime < compensatedTarget) {
-                    audio.playbackRate = 1.08; // slightly faster
-                    setTimeout(() => { audio.playbackRate = 1.0; }, 2000);
-                } else {
-                    audio.playbackRate = 0.92; // slightly slower
-                    setTimeout(() => { audio.playbackRate = 1.0; }, 2000);
-                }
-            } else {
+        // drift > 0 means local is ahead (needs to slow down), drift < 0 means local is behind (needs to speed up)
+        const drift = audio.currentTime - compensatedTarget;
+        const absDrift = Math.abs(drift);
+        
+        let deadband = 0.050; // 50ms default deadband
+        let maxTolerance = 1.0; // 1 second default for hard seek
+        
+        if (currentMedianRTT > 200) {
+            deadband = 0.080;
+            maxTolerance = 1.5;
+        } else if (currentMedianRTT > 100) {
+            deadband = 0.060;
+            maxTolerance = 1.2;
+        }
+
+        if (absDrift > deadband) {
+            if (absDrift > maxTolerance) {
                 // Large drift: Hard seek
+                console.log(`Playback drift detected (${Math.round(drift*1000)}ms). Hard seeking to ${compensatedTarget.toFixed(3)}s`);
                 audio.currentTime = compensatedTarget;
+                setTargetPlaybackRate(1.0);
+            } else {
+                // Minor drift: Perform elastic sync using target recovery window of 3 seconds
+                const recoveryTime = 3.0;
+                const rateOffset = -drift / recoveryTime;
+                const clampedOffset = Math.max(-0.03, Math.min(0.03, rateOffset));
+                const targetRate = 1.0 + clampedOffset;
+                
+                console.log(`Minor drift detected (${Math.round(drift * 1000)}ms). Adjusting target playbackRate to ${targetRate.toFixed(4)}`);
+                setTargetPlaybackRate(targetRate);
+            }
+        } else {
+            // Inside deadband: keep playbackRate at 1.0x
+            if (targetPlaybackRate !== 1.0) {
+                console.log(`Drift within deadband (${Math.round(drift * 1000)}ms). Resetting target playbackRate to 1.0`);
+                setTargetPlaybackRate(1.0);
             }
         }
     }
@@ -784,6 +943,7 @@ async function runClockSync() {
         const bestSamples = samples.slice(0, Math.ceil(samples.length / 2));
         const avgOffset = bestSamples.reduce((sum, s) => sum + s.offset, 0) / bestSamples.length;
         clockOffset = avgOffset;
+        currentMedianRTT = samples[0].rtt;
         console.log(`Clock sync: offset=${Math.round(clockOffset)}ms. RTT median=${Math.round(samples[0].rtt)}ms.`);
     }
 }
@@ -844,6 +1004,7 @@ window.sendJamVoteQueue = sendJamVoteQueue;
 window.sendJamRemoveQueue = sendJamRemoveQueue;
 window.sendJamReorderQueue = sendJamReorderQueue;
 window.sendJamSkipToNext = sendJamSkipToNext;
+window.sendJamSkipToPrev = sendJamSkipToPrev;
 window.sendJamChatMessage = sendJamChatMessage;
 window.sendJamReaction = sendJamReaction;
 window.sendJamSetRole = sendJamSetRole;
