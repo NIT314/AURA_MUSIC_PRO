@@ -40,7 +40,7 @@ class JamRoom:
         if role == "listener":
             if self.add_only_mode:
                 return action == "add_queue"
-            return action in ["add_queue", "vote_queue"]
+            return False
         return False
 
     async def toggle_add_only_mode(self, username: str, enabled: bool):
@@ -216,7 +216,6 @@ class JamRoom:
             "submitted_by": username
         }
         self.queue.append(queue_item)
-        self.sort_queue()
         await self.add_chat_msg("System", f"{username} added '{song['title']}' to queue.", msg_type="system")
         await self.broadcast_state()
 
@@ -253,26 +252,62 @@ class JamRoom:
             return sum(item["votes"].values())
         self.queue.sort(key=get_net_votes, reverse=True)
 
+    async def reorder_queue(self, username: str, queue_ids: List[str]):
+        if not self.has_permission(username, "control_playback"):
+            return
+        id_to_item = {item["id"]: item for item in self.queue}
+        new_queue = []
+        for q_id in queue_ids:
+            if q_id in id_to_item:
+                new_queue.append(id_to_item[q_id])
+        for item in self.queue:
+            if item["id"] not in queue_ids:
+                new_queue.append(item)
+        self.queue = new_queue
+        await self.broadcast_state()
+
     async def skip_to_next(self, username: str):
         if not self.has_permission(username, "control_playback"):
             return
         if self.queue:
-            next_song = self.queue.pop(0)
-            self.current_track = next_song
-            self.playback_state = "PLAYING"
-            self.playback_time = 0.0
-            self.last_updated = time.time()
-            await self.add_chat_msg("System", f"Playing next queued track: '{next_song['title']}'", msg_type="system")
-            await self.broadcast({
-                "type": "playback_sync",
-                "video_id": next_song["id"],
-                "state": "PLAYING",
-                "position": 0.0,
-                "track": self.current_track,
-                "server_time": time.time() * 1000,
-                "sender": username
-            })
-            await self.broadcast_state()
+            current_id = self.current_track.get("id") if self.current_track else None
+            next_index = 0
+            if current_id:
+                for idx, item in enumerate(self.queue):
+                    if item["id"] == current_id:
+                        next_index = idx + 1
+                        break
+            if next_index < len(self.queue):
+                next_song = self.queue[next_index]
+                self.current_track = next_song
+                self.playback_state = "PLAYING"
+                self.playback_time = 0.0
+                self.last_updated = time.time()
+                await self.add_chat_msg("System", f"Playing next queued track: '{next_song['title']}'", msg_type="system")
+                await self.broadcast({
+                    "type": "playback_sync",
+                    "video_id": next_song["id"],
+                    "state": "PLAYING",
+                    "position": 0.0,
+                    "track": self.current_track,
+                    "server_time": time.time() * 1000,
+                    "sender": username
+                })
+                await self.broadcast_state()
+            else:
+                self.playback_state = "PAUSED"
+                self.playback_time = 0.0
+                self.last_updated = time.time()
+                await self.broadcast({
+                    "type": "playback_sync",
+                    "video_id": "",
+                    "state": "PAUSED",
+                    "position": 0.0,
+                    "track": {},
+                    "server_time": time.time() * 1000,
+                    "sender": username
+                })
+                await self.broadcast_state()
         else:
             self.playback_state = "PAUSED"
             self.playback_time = 0.0

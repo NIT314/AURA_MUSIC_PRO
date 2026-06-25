@@ -795,6 +795,15 @@ function showJamSelectionMenu(track) {
         return;
     }
 
+    const isListener = window.getJamRole && window.getJamRole() === 'listener';
+    const addOnlyMode = window.getJamAddOnlyMode && window.getJamAddOnlyMode();
+    const canAdd = !isListener || addOnlyMode;
+
+    if (isListener && !canAdd) {
+        showToast("🎵 Listeners cannot add songs when Add-Only Mode is OFF");
+        return;
+    }
+
     // Prevent duplicates/stacking
     const existing = document.getElementById("jam-selection-popup-wrapper");
     if (existing) existing.remove();
@@ -809,14 +818,12 @@ function showJamSelectionMenu(track) {
     popup.className = "modal-card glass-panel";
     popup.style.cssText = "position:relative; z-index:100000; width:90%; max-width:400px; padding:20px; border-radius:12px;";
     
-    const isListener = window.getJamRole && window.getJamRole() === 'listener';
-    
     popup.innerHTML = `
         <h3>Jam Selection</h3>
         <p style="font-size:12px; margin-bottom:15px; color:var(--text-secondary);">Choose action for '${safe(track.title)}'</p>
         <div style="display:flex; flex-direction:column; gap:10px;">
             ${isListener ? '' : '<button class="btn btn-purple" id="jam-opt-play-now">Sync Play Now</button>'}
-            <button class="btn btn-gold" id="jam-opt-add-queue">Add to Voted Queue</button>
+            ${canAdd ? '<button class="btn btn-gold" id="jam-opt-add-queue">Add to Jam Queue</button>' : ''}
             <button class="btn" id="jam-opt-cancel">Cancel</button>
         </div>
     `;
@@ -835,13 +842,6 @@ function showJamSelectionMenu(track) {
         document.getElementById("jam-opt-play-now").onclick = () => {
             wrapper.remove();
             
-            // Remove from queue first if it is in the queue
-            if (window.isInsideJam && window.isInsideJam()) {
-                if (window.sendJamRemoveQueue) {
-                    window.sendJamRemoveQueue(track.id);
-                }
-            }
-            
             playSingleSong(track);
             // Jam mein sabko broadcast karo
             if (window.isInsideJam && window.isInsideJam()) {
@@ -857,11 +857,13 @@ function showJamSelectionMenu(track) {
         };
     }
     
-    document.getElementById("jam-opt-add-queue").onclick = () => {
-        wrapper.remove();
-        window.sendJamAddQueue(track);
-        showToast("Added to Jam Queue");
-    };
+    if (canAdd) {
+        document.getElementById("jam-opt-add-queue").onclick = () => {
+            wrapper.remove();
+            window.sendJamAddQueue(track);
+            showToast("Added to Jam Queue");
+        };
+    }
     
     document.getElementById("jam-opt-cancel").onclick = () => {
         wrapper.remove();
@@ -1145,6 +1147,7 @@ function onSongPlayStateChange(isPlaying) {
     }
 }
 
+window.playSingleSong = playSingleSong;
 async function playSingleSong(track, autoplay = true, fromJamSync = false) {
     if (!track) return;
 
@@ -3697,6 +3700,11 @@ function findTrackById(trackId) {
             }
         }
     }
+    if (!track && window.getJamQueue) {
+        const jq = window.getJamQueue();
+        const t = jq.find(s => s.id === trackId);
+        if (t) track = t;
+    }
     // Fallback: check currently loaded track directly
     if (!track && currentLoadedTrack && currentLoadedTrack.id === trackId) {
         track = currentLoadedTrack;
@@ -3744,7 +3752,7 @@ function openTrackActionMenu(event, trackId, context = {type: 'none'}) {
         if (context && context.type === "playlist") {
             removeBtn.classList.remove("hide");
             removeBtn.innerHTML = `<i class="fa-solid fa-trash"></i> Remove from Playlist`;
-        } else if (context && context.type === "queue") {
+        } else if (context && (context.type === "queue" || context.type === "jam_queue")) {
             removeBtn.classList.remove("hide");
             removeBtn.innerHTML = `<i class="fa-solid fa-trash"></i> Remove from Queue`;
         } else {
@@ -3948,10 +3956,12 @@ async function handleActionSheetAction(action) {
         case "jam":
             if (window.isInsideJam && window.isInsideJam()) {
                 const role = window.getJamRole ? window.getJamRole() : 'listener';
-                if (role === 'host' || role === 'co-host') {
+                const addOnlyMode = window.getJamAddOnlyMode && window.getJamAddOnlyMode();
+                const canAdd = (role === 'host' || role === 'co-host' || role === 'moderator' || role === 'contributor' || addOnlyMode);
+                if (canAdd) {
                     showJamSelectionMenu(track);
                 } else {
-                    showToast("🎵 Only Host or Co-Host can change songs in Jam");
+                    showToast("🎵 You do not have permission to add songs in this Jam");
                 }
             } else {
                 const jamTabBtn = document.querySelector('.nav-btn[data-tab="jam"]') || document.querySelector('.mobile-tab-btn[data-tab="jam"]');
@@ -4043,6 +4053,12 @@ async function handleActionSheetAction(action) {
                     
                     showToast(`Removed "${track.title}" from queue 🗑️`);
                     renderQueueDrawer();
+                } else if (currentActionMenuContext.type === "jam_queue") {
+                    if (window.isInsideJam && window.isInsideJam()) {
+                        if (window.sendJamRemoveQueue) {
+                            window.sendJamRemoveQueue(track.id);
+                        }
+                    }
                 }
             }
             break;

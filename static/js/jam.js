@@ -7,6 +7,8 @@ let jamSocket = null;
 let currentRoomCode = "";
 let currentUsername = "";
 let currentUserRole = "listener"; // Default
+let currentJamRoomState = null;
+let draggingElement = null;
 let jamReconnectTimer = null;
 let jamReconnectAttempts = 0;
 let jamShouldReconnect = false; // Only reconnect if user hasn't manually left
@@ -328,6 +330,7 @@ function handleJamWSMessage(data) {
 // UI State Bindings
 
 function updateJamRoomUI(state) {
+    currentJamRoomState = state;
     // 1. Resolve current user role
     const me = state.users.find(u => u.username === currentUsername);
     if (me) {
@@ -394,58 +397,110 @@ function updateJamRoomUI(state) {
         usersContainer.appendChild(chip);
     });
 
-    // 4. Render Shared Queue with upvote/downvote scores
+    // 4. Render Queue
     const queueContainer = document.getElementById("jam-queue-list");
     queueContainer.innerHTML = "";
     
     if (state.queue.length === 0) {
         queueContainer.innerHTML = `<div class="empty-queue-msg">Queue is empty. Find songs in Search!</div>`;
     } else {
+        const canControl = currentUserRole === "host" || currentUserRole === "co-host";
+        const isActiveTrack = (item) => {
+            return state.playback.current_track && state.playback.current_track.id === item.id;
+        };
+
         state.queue.forEach((item, idx) => {
             const row = document.createElement("div");
-            row.className = "track-row";
+            const active = isActiveTrack(item);
+            row.className = `track-row ${active ? 'active-track' : ''}`;
             
-            // Check if user already upvoted/downvoted
-            const userVote = item.votes[currentUsername] || 0;
-            const upClass = userVote === 1 ? "text-primary glow-gold" : "";
-            const downClass = userVote === -1 ? "text-primary glow-purple" : "";
+            let dragHandleHTML = "";
+            let menuBtnHTML = "";
             
-            const isListener = currentUserRole === "listener";
-            const hideVoting = state.add_only_mode && isListener;
+            if (canControl) {
+                row.draggable = true;
+                row.setAttribute('data-id', item.id);
+                
+                // HTML5 Drag and Drop events
+                row.addEventListener('dragstart', (e) => {
+                    draggingElement = row;
+                    row.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                row.addEventListener('dragend', () => {
+                    row.classList.remove('dragging');
+                    draggingElement = null;
+                    const rows = Array.from(queueContainer.querySelectorAll('.track-row'));
+                    const newIds = rows.map(r => r.getAttribute('data-id'));
+                    if (window.sendJamReorderQueue) {
+                        window.sendJamReorderQueue(newIds);
+                    }
+                });
+                row.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    if (!draggingElement || draggingElement === row) return;
+                    
+                    const bounding = row.getBoundingClientRect();
+                    const offset = e.clientY - bounding.top - (bounding.height / 2);
+                    if (offset > 0) {
+                        row.after(draggingElement);
+                    } else {
+                        row.before(draggingElement);
+                    }
+                });
 
-            let upvoteBtnHTML = `<button class="${upClass}" onclick="sendJamVoteQueue('${item.id}', ${userVote === 1 ? 0 : 1})" title="Upvote"><i class="fa-solid fa-thumbs-up"></i></button>`;
-            let downvoteBtnHTML = `<button class="${downClass}" onclick="sendJamVoteQueue('${item.id}', ${userVote === -1 ? 0 : -1})" title="Downvote"><i class="fa-solid fa-thumbs-down"></i></button>`;
-            
-            if (hideVoting) {
-                upvoteBtnHTML = `<button class="${upClass}" style="display:none;" disabled title="Upvote"><i class="fa-solid fa-thumbs-up"></i></button>`;
-                downvoteBtnHTML = `<button class="${downClass}" style="display:none;" disabled title="Downvote"><i class="fa-solid fa-thumbs-down"></i></button>`;
-            }
-
-            let removeBtnHTML = "";
-            const canRemove = currentUserRole === "host" || currentUserRole === "co-host" || currentUserRole === "moderator" || (item.submitted_by === currentUsername && !(state.add_only_mode && currentUserRole === "listener"));
-            if (canRemove) {
-                removeBtnHTML = `<button onclick="sendJamRemoveQueue('${item.id}')" title="Remove"><i class="fa-solid fa-trash-can"></i></button>`;
+                dragHandleHTML = `
+                    <button class="track-drag-handle" onclick="event.stopPropagation();" title="Drag to reorder">
+                        <i class="fa-solid fa-grip-lines"></i>
+                    </button>
+                `;
+                menuBtnHTML = `
+                    <button class="track-menu-btn" onclick="openTrackActionMenu(event, '${item.id}', {type: 'jam_queue'})">
+                        <i class="fa-solid fa-ellipsis-vertical"></i>
+                    </button>
+                `;
             }
 
             row.onclick = (event) => {
                 if (event.target.closest("button")) return;
-                if (window.showJamSelectionMenu) {
-                    window.showJamSelectionMenu(item);
+                
+                const role = window.getJamRole ? window.getJamRole() : 'listener';
+                if (role !== 'host' && role !== 'co-host') {
+                    showToast("🎵 Only Host or Co-Host can change songs in Jam");
+                    return;
+                }
+                
+                // Directly play and sync the song!
+                if (window.playSingleSong) {
+                    window.playSingleSong(item);
+                } else if (typeof playSingleSong !== 'undefined') {
+                    playSingleSong(item);
+                }
+                
+                if (window.isInsideJam && window.isInsideJam()) {
+                    if (window.sendJamPlaybackUpdate) {
+                        setTimeout(() => {
+                            window.sendJamPlaybackUpdate(
+                                item.id,
+                                "PLAYING",
+                                0,
+                                item
+                            );
+                        }, 800);
+                    }
                 }
             };
 
             row.innerHTML = `
                 <div class="track-row-art"><img src="${item.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=100&q=80'}"></div>
                 <div class="track-row-info">
-                    <h4>${escapeHTML(item.title)}</h4>
+                    <h4 style="${active ? 'color: var(--gold);' : ''}">${escapeHTML(item.title)}</h4>
                     <p>${escapeHTML(item.artist)} • <span style="font-size:10px; color:var(--text-muted);">Added by ${escapeHTML(item.submitted_by)}</span></p>
                 </div>
                 <div class="track-row-actions">
                     <span class="track-duration-badge">${item.duration}</span>
-                    ${upvoteBtnHTML}
-                    <span style="font-size:12px; font-weight:700; color:var(--gold); min-width:14px; text-align:center;">${item.net_votes}</span>
-                    ${downvoteBtnHTML}
-                    ${removeBtnHTML}
+                    ${menuBtnHTML}
+                    ${dragHandleHTML}
                 </div>
             `;
             queueContainer.appendChild(row);
@@ -772,6 +827,14 @@ function sendJamEQState(settings) {
     }));
 }
 
+function sendJamReorderQueue(queueIds) {
+    if (!jamSocket || jamSocket.readyState !== WebSocket.OPEN) return;
+    jamSocket.send(JSON.stringify({
+        type: "reorder_queue",
+        queue_ids: queueIds
+    }));
+}
+
 // Export symbols to window
 window.connectJamRoom = connectJamRoom;
 window.leaveJamRoom = leaveJamRoom;
@@ -779,6 +842,7 @@ window.sendJamPlaybackUpdate = sendJamPlaybackUpdate;
 window.sendJamAddQueue = sendJamAddQueue;
 window.sendJamVoteQueue = sendJamVoteQueue;
 window.sendJamRemoveQueue = sendJamRemoveQueue;
+window.sendJamReorderQueue = sendJamReorderQueue;
 window.sendJamSkipToNext = sendJamSkipToNext;
 window.sendJamChatMessage = sendJamChatMessage;
 window.sendJamReaction = sendJamReaction;
@@ -787,6 +851,8 @@ window.sendJamEQState = sendJamEQState;
 window.isInsideJam = () => jamSocket !== null && jamSocket.readyState === WebSocket.OPEN;
 window.getJamRole = () => currentUserRole;
 window.getJamUsername = () => currentUsername;
+window.getJamQueue = () => currentJamRoomState ? currentJamRoomState.queue : [];
+window.getJamAddOnlyMode = () => currentJamRoomState ? currentJamRoomState.add_only_mode : false;
 
 // Wire up Host Add-Only Mode toggle button
 document.addEventListener("DOMContentLoaded", () => {

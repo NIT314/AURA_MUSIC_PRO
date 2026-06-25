@@ -175,6 +175,10 @@ async def jam_websocket_handler(websocket: WebSocket, room_code: str, username: 
             elif msg_type == "remove_queue":
                 song_id = data.get("song_id")
                 await room.remove_from_queue(username, song_id)
+            elif msg_type == "reorder_queue":
+                queue_ids = data.get("queue_ids")
+                if queue_ids:
+                    await room.reorder_queue(username, queue_ids)
             elif msg_type == "skip_to_next":
                 await room.skip_to_next(username)
             elif msg_type == "chat":
